@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:cursor_chat/api/cursor_api.dart';
+import 'package:cursor_chat/models/models.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -76,12 +77,90 @@ void main() {
         await req.response.close();
         return;
       }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-gone/stream') {
+        await sendJson(409, {
+          'error': {
+            'code': 'stream_unavailable',
+            'message': 'Run stream is no longer available',
+          },
+        });
+        return;
+      }
+      if (req.method == 'GET' && path == '/v1/agents/bc-test/runs/run-gone') {
+        await sendJson(200, {
+          'id': 'run-gone',
+          'agentId': 'bc-test',
+          'status': 'FINISHED',
+          'result': 'jian-10 loadout',
+        });
+        return;
+      }
       if (req.method == 'GET' && path == '/v1/agents/bc-test/runs/run-drop') {
         await sendJson(200, {
           'id': 'run-drop',
           'agentId': 'bc-test',
           'status': 'FINISHED',
           'result': 'polled after drop',
+        });
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-410/stream') {
+        req.response.statusCode = 410;
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'GET' && path == '/v1/agents/bc-test/runs/run-410') {
+        await sendJson(200, {
+          'id': 'run-410',
+          'agentId': 'bc-test',
+          'status': 'FINISHED',
+          'result': 'gone via 410',
+        });
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-error/stream') {
+        req.response.statusCode = 200;
+        req.response.headers.set(
+          'Content-Type',
+          'text/event-stream; charset=utf-8',
+        );
+        req.response.add(
+          utf8.encode(
+            'event: status\ndata: {"runId":"run-error","status":"RUNNING"}\n\n'
+            'event: status\ndata: {"runId":"run-error","status":"ERROR"}\n\n'
+            'event: result\ndata: {"runId":"run-error","status":"ERROR"}\n\n'
+            'event: done\ndata: {}\n\n',
+          ),
+        );
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'GET' && path == '/v1/agents/bc-test/runs/run-error') {
+        await sendJson(200, {
+          'id': 'run-error',
+          'agentId': 'bc-test',
+          'status': 'ERROR',
+          'result': null,
+          'error': null,
+        });
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-error-poll/stream') {
+        req.response.statusCode = 410;
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-error-poll') {
+        await sendJson(200, {
+          'id': 'run-error-poll',
+          'agentId': 'bc-test',
+          'status': 'ERROR',
+          'result': null,
         });
         return;
       }
@@ -178,5 +257,71 @@ void main() {
       onDelta: (_) {},
     );
     expect(text, 'polled after drop');
+  });
+
+  test('streamRun polls when the SSE stream is already gone', () async {
+    final text = await api.streamRun(
+      agentId: 'bc-test',
+      runId: 'run-gone',
+      onDelta: (_) {},
+    );
+    expect(text, 'jian-10 loadout');
+  });
+
+  test('streamRun polls after HTTP 410', () async {
+    final text = await api.streamRun(
+      agentId: 'bc-test',
+      runId: 'run-410',
+      onDelta: (_) {},
+    );
+    expect(text, 'gone via 410');
+  });
+
+  test('stream_unavailable is treated as a finished stream', () {
+    expect(
+      CursorApiException(
+        409,
+        '{"error":{"code":"stream_unavailable"}}',
+      ).isStreamGone,
+      isTrue,
+    );
+    expect(CursorApiException(410, '').isStreamGone, isTrue);
+    expect(CursorApiException(409, 'agent_busy').isStreamGone, isFalse);
+  });
+
+  test('streamRun throws when the run status is ERROR', () async {
+    try {
+      await api.streamRun(
+        agentId: 'bc-test',
+        runId: 'run-error',
+        onDelta: (_) {},
+      );
+      fail('expected RunFailedException');
+    } on RunFailedException catch (e) {
+      expect(e.status, 'ERROR');
+    }
+  });
+
+  test('polling an ERROR run does not become 运行结束：ERROR', () async {
+    try {
+      await api.streamRun(
+        agentId: 'bc-test',
+        runId: 'run-error-poll',
+        onDelta: (_) {},
+      );
+      fail('expected RunFailedException');
+    } on RunFailedException catch (e) {
+      expect(e.status, 'ERROR');
+      expect(e.userMessage.contains('运行结束'), isFalse);
+    }
+  });
+
+  test('waitForRunText throws instead of returning 运行结束：ERROR', () async {
+    try {
+      await api.waitForRunText('bc-test', 'run-error');
+      fail('expected RunFailedException');
+    } on RunFailedException catch (e) {
+      expect(e.status, 'ERROR');
+    }
   });
 }

@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
@@ -13,6 +15,7 @@ import 'widgets/answer_body.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  SemanticsBinding.instance.ensureSemantics();
   final store = ChatStore();
   await store.load();
   runApp(ChatApp(store: store));
@@ -133,7 +136,7 @@ class ChatHome extends StatelessWidget {
                     ),
                   ],
                 ),
-              if (store.error != null)
+              if (store.visibleError != null)
                 Material(
                   color: Theme.of(context).colorScheme.errorContainer,
                   child: Padding(
@@ -142,7 +145,7 @@ class ChatHome extends StatelessWidget {
                       children: [
                         Expanded(
                           child: Text(
-                            store.error!,
+                            store.visibleError!,
                             style: TextStyle(
                               color: Theme.of(
                                 context,
@@ -150,6 +153,12 @@ class ChatHome extends StatelessWidget {
                             ),
                           ),
                         ),
+                        if (store.canRetryLast)
+                          TextButton(
+                            key: const Key('retry-error-banner'),
+                            onPressed: () => unawaited(store.retryLast()),
+                            child: const Text('重发'),
+                          ),
                         IconButton(
                           onPressed: store.clearError,
                           icon: const Icon(Icons.close),
@@ -202,6 +211,7 @@ class ConversationDrawer extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+                    subtitle: store.isSending(c.id) ? const Text('回复中…') : null,
                     onTap: () {
                       store.selectChat(c.id);
                       Navigator.pop(context);
@@ -241,19 +251,45 @@ class _MessageList extends StatelessWidget {
         ),
       );
     }
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      itemCount: messages.length,
-      itemBuilder: (context, i) =>
-          _Bubble(key: ValueKey(messages[i].id), message: messages[i]),
+    return SelectionArea(
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        itemCount: messages.length,
+        itemBuilder: (context, i) => _Bubble(
+          key: ValueKey(messages[i].id),
+          message: messages[i],
+          store: store,
+          showRetry:
+              i == messages.length - 1 &&
+              messages[i].role == 'assistant' &&
+              store.canRetryLast,
+        ),
+      ),
     );
   }
 }
 
+Future<void> _copyReply(BuildContext context, String text) async {
+  final t = text.trim();
+  if (t.isEmpty) return;
+  await Clipboard.setData(ClipboardData(text: t));
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text('已复制'), duration: Duration(seconds: 1)),
+  );
+}
+
 class _Bubble extends StatelessWidget {
-  const _Bubble({super.key, required this.message});
+  const _Bubble({
+    super.key,
+    required this.message,
+    required this.store,
+    this.showRetry = false,
+  });
 
   final ChatMessage message;
+  final ChatStore store;
+  final bool showRetry;
 
   @override
   Widget build(BuildContext context) {
@@ -313,8 +349,47 @@ class _Bubble extends StatelessWidget {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       ),
                     )
-                  else
-                    AnswerBody(text: message.text.isEmpty ? '…' : message.text),
+                  else ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: AnswerBody(
+                        text: message.text.isEmpty ? '…' : message.text,
+                      ),
+                    ),
+                    if (!message.streaming && message.text.trim().isNotEmpty)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (showRetry)
+                              Tooltip(
+                                message: '重发',
+                                child: TextButton.icon(
+                                  key: Key('retry-reply-${message.id}'),
+                                  onPressed: store.sending
+                                      ? null
+                                      : () => unawaited(store.retryLast()),
+                                  icon: const Icon(Icons.refresh, size: 18),
+                                  label: const Text('重发'),
+                                ),
+                              ),
+                            if (!isFailedAssistantText(message.text))
+                              IconButton(
+                                key: Key('copy-reply-${message.id}'),
+                                tooltip: '复制',
+                                visualDensity: VisualDensity.compact,
+                                onPressed: () =>
+                                    _copyReply(context, message.text),
+                                icon: const Icon(
+                                  Icons.copy_outlined,
+                                  size: 18,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                  ],
                 ],
               ),
             ),
@@ -335,38 +410,41 @@ class _ThinkingTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final label = streaming ? '思考中…' : '思考过程';
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        initiallyExpanded: false,
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.only(bottom: 8),
-        visualDensity: VisualDensity.compact,
-        title: Text(
-          thinking.trim().isEmpty ? label : '$label（点开查看）',
-          style: Theme.of(
-            context,
-          ).textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant),
-        ),
-        children: [
-          if (thinking.trim().isEmpty)
-            Text(
-              '还没有详细内容',
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-            )
-          else
-            Align(
-              alignment: Alignment.centerLeft,
-              child: SelectableText(
-                thinking,
+    return Material(
+      color: Colors.transparent,
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: false,
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: const EdgeInsets.only(bottom: 8),
+          visualDensity: VisualDensity.compact,
+          title: Text(
+            thinking.trim().isEmpty ? label : '$label（点开查看）',
+            style: Theme.of(
+              context,
+            ).textTheme.labelMedium?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+          children: [
+            if (thinking.trim().isEmpty)
+              Text(
+                '还没有详细内容',
                 style: Theme.of(
                   context,
                 ).textTheme.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+              )
+            else
+              Align(
+                alignment: Alignment.centerLeft,
+                child: SelectableText(
+                  thinking,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -583,6 +661,7 @@ class _ComposerState extends State<Composer> {
                   ),
                 Expanded(
                   child: TextField(
+                    key: const Key('composer-input'),
                     controller: _controller,
                     minLines: 1,
                     maxLines: 6,
@@ -600,6 +679,8 @@ class _ComposerState extends State<Composer> {
                 ),
                 const SizedBox(width: 8),
                 IconButton.filled(
+                  key: const Key('composer-send'),
+                  tooltip: '发送',
                   onPressed: busy ? null : _send,
                   icon: busy
                       ? const SizedBox(

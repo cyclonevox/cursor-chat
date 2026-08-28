@@ -259,7 +259,7 @@ class CursorApi {
         return run['id'] as String;
       } on CursorApiException catch (e) {
         last = e;
-        if (e.status != 409) rethrow;
+        if (e.status != 409 || e.isStreamGone) rethrow;
         await Future<void>.delayed(Duration(seconds: 1 + i));
       }
     }
@@ -297,7 +297,12 @@ class CursorApi {
         poll = true;
       } else if (res.statusCode < 200 || res.statusCode >= 300) {
         final body = await utf8.decodeStream(res);
-        throw CursorApiException(res.statusCode, body);
+        final err = CursorApiException(res.statusCode, body);
+        if (err.isStreamGone) {
+          poll = true;
+        } else {
+          throw err;
+        }
       } else {
         final parser = SseParser();
         await for (final chunk in res.transform(utf8.decoder)) {
@@ -310,7 +315,14 @@ class CursorApi {
             }
             switch (event.event) {
               case 'status':
-                onStatus?.call(data['status'] as String? ?? '');
+                final st = data['status'] as String? ?? '';
+                onStatus?.call(st);
+                if (isFailedRunStatus(st)) {
+                  throw RunFailedException(
+                    st,
+                    message: runFailureMessage(data),
+                  );
+                }
               case 'thinking':
                 final think = data['text'] as String? ?? '';
                 if (think.isNotEmpty) onThinking?.call(think);
@@ -321,14 +333,25 @@ class CursorApi {
                   onDelta(text);
                 }
               case 'result':
+                final st = data['status'] as String? ?? '';
+                if (isFailedRunStatus(st)) {
+                  throw RunFailedException(
+                    st,
+                    message: runFailureMessage(data),
+                  );
+                }
                 final text = data['text'] as String?;
                 if (text != null && text.isNotEmpty) {
+                  if (isFailedAssistantText(text)) {
+                    throw RunFailedException('ERROR', message: text);
+                  }
                   return text;
                 }
               case 'error':
-                throw CursorApiException(
-                  1,
-                  data['message'] as String? ?? event.data,
+                throw RunFailedException(
+                  'ERROR',
+                  code: data['code'] as String?,
+                  message: data['message'] as String? ?? event.data,
                 );
               case 'done':
                 if (assembled.isNotEmpty) return assembled.toString();
@@ -339,8 +362,10 @@ class CursorApi {
         if (assembled.isNotEmpty) return assembled.toString();
         poll = true;
       }
+    } on RunFailedException {
+      rethrow;
     } on CursorApiException catch (e) {
-      if (e.status != 0 && e.status != 410) rethrow;
+      if (e.status != 0 && !e.isStreamGone) rethrow;
       poll = true;
     } catch (e) {
       if (!isTransientNetworkError(e)) rethrow;
@@ -359,6 +384,7 @@ class CursorApi {
         }
         return assembled.toString();
       } catch (e) {
+        if (e is RunFailedException) rethrow;
         if (assembled.isNotEmpty) return assembled.toString();
         rethrow;
       }
@@ -372,16 +398,18 @@ class CursorApi {
       try {
         final run = await getRun(agentId, runId);
         final status = run['status'] as String? ?? '';
-        if (const {
-          'FINISHED',
-          'ERROR',
-          'CANCELLED',
-          'EXPIRED',
-        }.contains(status)) {
-          return run['result'] as String? ??
-              (status == 'FINISHED' ? '' : '运行结束：$status');
+        if (isFailedRunStatus(status)) {
+          throw RunFailedException(status, message: runFailureMessage(run));
+        }
+        if (status == 'FINISHED') {
+          final result = run['result'] as String? ?? '';
+          if (isFailedAssistantText(result)) {
+            throw RunFailedException('ERROR', message: result);
+          }
+          return result;
         }
       } catch (e) {
+        if (e is RunFailedException) rethrow;
         if (e is CursorApiException) last = e;
         if (!isTransientNetworkError(e) &&
             e is CursorApiException &&
@@ -464,13 +492,15 @@ bool isTransientNetworkError(Object e) {
 }
 
 String friendlyNetworkError(Object e) {
+  if (e is RunFailedException) return e.userMessage;
   if (isTransientNetworkError(e)) {
-    return '网络中断了。后台任务还在跑，回来后会自动取回结果；仍没有的话再发一次。';
+    return '网络中断了。点重发会立刻再试；云端还在跑的话会把结果拉回来。';
   }
   return e.toString();
 }
 
 const kFirstTurnPrefix =
-    '你是手机上的问答助手。用户可能发文字，也可能发题目/屏幕/工作内容的照片。'
-    '用用户的语言直接回答、讲清楚为什么。不要主动建代码仓库或改项目，除非用户明确要求写代码。'
-    '事实、版本号、新闻、文档以用户消息里的当前时间为准，必须查新，不要用过时记忆。\n\n';
+    '你是手机上的通用助手，拍题、闲聊、工作问题都直接答，像 ChatGPT 一样说话。'
+    '有照片时先看清图再答；讲题把关键步骤和原因说清。'
+    '用户没明确要求时，不要建仓库、开 PR、改项目，也不要主动写一堆代码。'
+    '用用户的语言，短而清楚。\n\n';
