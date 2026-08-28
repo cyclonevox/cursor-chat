@@ -8,6 +8,16 @@ Cursor still has no Android app, only a browser. This is a native client for tha
 
 > Not affiliated with Anysphere / Cursor. You need your own [Cursor API key](https://cursor.com/dashboard/api), and an account that can create **no-repo** Cloud Agents.
 
+## Download
+
+Latest APK (built automatically when `main` is updated):
+
+**https://github.com/cyclonevox/cursor-chat/releases/latest/download/cursor-chat.apk**
+
+On Android, allow installing from the browser / GitHub. Then Settings → paste your API key.
+
+合并进 `main` 后，GitHub Actions 会跑测试、打 release APK，并发布到 [Releases](https://github.com/cyclonevox/cursor-chat/releases/latest)。
+
 ## Features
 
 - Paste an API key in Settings; it stays on the device
@@ -43,7 +53,7 @@ flutter build apk --release
 
 APK path: `build/app/outputs/flutter-apk/app-release.apk`
 
-The release build currently signs with the **debug** keystore so `flutter run --release` works. Do not ship that APK to a store; add your own signing config first.
+If `android/key.properties` (or the matching GitHub Actions secrets) is present, release builds use that upload keystore so later APKs can overwrite-install. Otherwise CI signs with the debug key.
 
 ## Run on Linux (debug)
 
@@ -81,12 +91,12 @@ CURSOR_API_KEY=cursor_… dart run tool/live_qa.dart
 
 Cursor 没有安卓 App，网页版用起来别扭。这个仓库是一个 ChatGPT 式的原生客户端：设置里粘贴 [API Key](https://cursor.com/dashboard/api)，就可以在手机上开对话、发图、拍照、继续追问。每条会话对应一个不绑仓库的 Cloud Agent；Key 和聊天记录只存在本机。
 
+直接装：[Releases](https://github.com/cyclonevox/cursor-chat/releases/latest) 里的 `cursor-chat.apk`。合并进 `main` 会自动打包。
+
 ```bash
 flutter build apk --release
 # build/app/outputs/flutter-apk/app-release.apk
 ```
-
-当前 release 用的是 debug 签名，方便自己装；上架前请换成自己的 keystore。
 
 ## License
 

@@ -47,3 +47,4 @@ app.*.map.json
 
 # Local UI captures (often the whole desktop)
 tool/ui_shots/
+/dist/
