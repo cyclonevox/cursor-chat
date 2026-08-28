@@ -2,9 +2,9 @@
 
 **A simple Cursor chat client for Android.**
 
-Paste an API key and talk to **no-repo** Cloud Agents. Linux works too.
+Paste an API key and talk to **no-repo** Cloud Agents.
 
-**简易的 Cursor 对话安卓客户端。** 设置里粘贴 API Key，就能和不绑仓库的 Cloud Agent 聊天。Linux 也能跑。
+**简易的 Cursor 对话安卓客户端。** 设置里粘贴 API Key，就能和不绑仓库的 Cloud Agent 聊天。
 
 > Unofficial. Not affiliated with Anysphere / Cursor. You need your own [API key](https://cursor.com/dashboard/api), and an account that can create **no-repo** Cloud Agents.
 >
