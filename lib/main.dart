@@ -9,6 +9,7 @@ import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'api/cursor_api.dart';
 import 'models/models.dart';
 import 'store.dart';
 import 'theme.dart';
@@ -130,78 +131,80 @@ class ChatHome extends StatelessWidget {
                       child: Padding(
                         padding: const EdgeInsets.only(top: kToolbarHeight),
                         child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          if (store.apiKey.trim().isEmpty)
-                            FrostedSurface(
-                              sigma: 24,
-                              tint: scheme.surface.withValues(alpha: 0.7),
-                              border: Border(
-                                bottom: BorderSide(
-                                  color: scheme.outline.withValues(alpha: 0.25),
-                                ),
-                              ),
-                              child: MaterialBanner(
-                                backgroundColor: Colors.transparent,
-                                surfaceTintColor: Colors.transparent,
-                                dividerColor: Colors.transparent,
-                                content: const Text(
-                                  '先在设置里填入 Cursor API Key，才能发消息。',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () {
-                                      Navigator.of(context).push(
-                                        MaterialPageRoute<void>(
-                                          builder: (_) =>
-                                              SettingsPage(store: store),
-                                        ),
-                                      );
-                                    },
-                                    child: const Text('去设置'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          if (store.visibleError != null)
-                            FrostedSurface(
-                              sigma: 24,
-                              tint: scheme.errorContainer.withValues(
-                                alpha: 0.72,
-                              ),
-                              child: Padding(
-                                padding: const EdgeInsets.fromLTRB(
-                                  16,
-                                  8,
-                                  4,
-                                  8,
-                                ),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        store.visibleError!,
-                                        style: TextStyle(
-                                          color: scheme.onErrorContainer,
-                                        ),
-                                      ),
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (store.apiKey.trim().isEmpty)
+                              FrostedSurface(
+                                sigma: 24,
+                                tint: scheme.surface.withValues(alpha: 0.7),
+                                border: Border(
+                                  bottom: BorderSide(
+                                    color: scheme.outline.withValues(
+                                      alpha: 0.25,
                                     ),
-                                    if (store.canRetryLast)
-                                      TextButton(
-                                        key: const Key('retry-error-banner'),
-                                        onPressed: () =>
-                                            unawaited(store.retryLast()),
-                                        child: const Text('重发'),
-                                      ),
-                                    IconButton(
-                                      onPressed: store.clearError,
-                                      icon: const Icon(Icons.close),
+                                  ),
+                                ),
+                                child: MaterialBanner(
+                                  backgroundColor: Colors.transparent,
+                                  surfaceTintColor: Colors.transparent,
+                                  dividerColor: Colors.transparent,
+                                  content: const Text(
+                                    '还没有 API Key。打开设置，按里面的说明在网页上创建一个。',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () {
+                                        Navigator.of(context).push(
+                                          MaterialPageRoute<void>(
+                                            builder: (_) =>
+                                                SettingsPage(store: store),
+                                          ),
+                                        );
+                                      },
+                                      child: const Text('去设置'),
                                     ),
                                   ],
                                 ),
                               ),
-                            ),
-                        ],
+                            if (store.visibleError != null)
+                              FrostedSurface(
+                                sigma: 24,
+                                tint: scheme.errorContainer.withValues(
+                                  alpha: 0.72,
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.fromLTRB(
+                                    16,
+                                    8,
+                                    4,
+                                    8,
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Text(
+                                          store.visibleError!,
+                                          style: TextStyle(
+                                            color: scheme.onErrorContainer,
+                                          ),
+                                        ),
+                                      ),
+                                      if (store.canRetryLast)
+                                        TextButton(
+                                          key: const Key('retry-error-banner'),
+                                          onPressed: () =>
+                                              unawaited(store.retryLast()),
+                                          child: const Text('重发'),
+                                        ),
+                                      IconButton(
+                                        onPressed: store.clearError,
+                                        icon: const Icon(Icons.close),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                     ),
@@ -236,56 +239,61 @@ class ConversationDrawer extends StatelessWidget {
         child: Material(
           type: MaterialType.transparency,
           child: SafeArea(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 12, 12, 8),
-                child: Text(
-                  '对话',
-                  style: Theme.of(context).textTheme.titleMedium,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 12, 8),
+                  child: Text(
+                    '对话',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                 ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.edit_square),
-                title: const Text('新对话'),
-                onTap: () {
-                  store.newChat();
-                  Navigator.pop(context);
-                },
-              ),
-              Divider(height: 1, color: scheme.outline.withValues(alpha: 0.3)),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: store.conversations.length,
-                  itemBuilder: (context, i) {
-                    final c = store.conversations[i];
-                    final selected = c.id == store.active?.id;
-                    return ListTile(
-                      selected: selected,
-                      selectedTileColor: scheme.primary.withValues(alpha: 0.14),
-                      title: Text(
-                        c.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      subtitle: store.isSending(c.id)
-                          ? const Text('回复中…')
-                          : null,
-                      onTap: () {
-                        store.selectChat(c.id);
-                        Navigator.pop(context);
-                      },
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        onPressed: () => store.deleteChat(c.id),
-                      ),
-                    );
+                ListTile(
+                  leading: const Icon(Icons.edit_square),
+                  title: const Text('新对话'),
+                  onTap: () {
+                    store.newChat();
+                    Navigator.pop(context);
                   },
                 ),
-              ),
-            ],
-          ),
+                Divider(
+                  height: 1,
+                  color: scheme.outline.withValues(alpha: 0.3),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: store.conversations.length,
+                    itemBuilder: (context, i) {
+                      final c = store.conversations[i];
+                      final selected = c.id == store.active?.id;
+                      return ListTile(
+                        selected: selected,
+                        selectedTileColor: scheme.primary.withValues(
+                          alpha: 0.14,
+                        ),
+                        title: Text(
+                          c.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: store.isSending(c.id)
+                            ? const Text('回复中…')
+                            : null,
+                        onTap: () {
+                          store.selectChat(c.id);
+                          Navigator.pop(context);
+                        },
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () => store.deleteChat(c.id),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -293,10 +301,27 @@ class ConversationDrawer extends StatelessWidget {
   }
 }
 
-class _MessageList extends StatelessWidget {
+class _MessageList extends StatefulWidget {
   const _MessageList({required this.store});
 
   final ChatStore store;
+
+  @override
+  State<_MessageList> createState() => _MessageListState();
+}
+
+class _MessageListState extends State<_MessageList> {
+  final _scroll = ScrollController();
+  final _latestUserKey = GlobalKey();
+  String? _revealedFor;
+
+  ChatStore get store => widget.store;
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -318,21 +343,65 @@ class _MessageList extends StatelessWidget {
       );
     }
     final topPad = MediaQuery.paddingOf(context).top + kToolbarHeight + 12;
+    final userIndex = messages.lastIndexWhere((m) => m.role == 'user');
+    final anchorIndex = userIndex >= 0 ? userIndex : messages.length - 1;
+    final token = '${conv!.id}:${messages[anchorIndex].id}';
+    if (token != _revealedFor) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _revealLatestUser(token);
+      });
+    }
+    // reverse:true pins the newest bubble to the visual bottom. Vertical
+    // padding is swapped along the scroll axis, so composer space goes in
+    // [top] and the app-bar inset goes in [bottom].
     return SelectionArea(
       child: ListView.builder(
-        padding: EdgeInsets.fromLTRB(16, topPad, 16, 132),
+        key: ValueKey(conv.id),
+        controller: _scroll,
+        reverse: true,
+        padding: EdgeInsets.fromLTRB(16, 132, 16, topPad),
         itemCount: messages.length,
-        itemBuilder: (context, i) => _Bubble(
-          key: ValueKey(messages[i].id),
-          message: messages[i],
-          store: store,
-          showRetry:
-              i == messages.length - 1 &&
-              messages[i].role == 'assistant' &&
-              store.canRetryLast,
-        ),
+        itemBuilder: (context, i) {
+          final index = messages.length - 1 - i;
+          final message = messages[index];
+          return _Bubble(
+            key: index == anchorIndex ? _latestUserKey : ValueKey(message.id),
+            message: message,
+            store: store,
+            showRetry:
+                index == messages.length - 1 &&
+                message.role == 'assistant' &&
+                store.canRetryLast,
+          );
+        },
       ),
     );
+  }
+
+  void _revealLatestUser(String token, [int attempt = 0]) {
+    if (!mounted || _revealedFor == token) return;
+    final ctx = _latestUserKey.currentContext;
+    if (ctx == null) {
+      if (attempt >= 12 || !_scroll.hasClients) return;
+      final pos = _scroll.position;
+      final next = (pos.pixels + pos.viewportDimension * 0.9).clamp(
+        0.0,
+        pos.maxScrollExtent,
+      );
+      if (next > pos.pixels + 1) _scroll.jumpTo(next);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _revealLatestUser(token, attempt + 1);
+      });
+      return;
+    }
+    final box = ctx.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return;
+    final top = box.localToGlobal(Offset.zero).dy;
+    final minY = MediaQuery.paddingOf(ctx).top + kToolbarHeight;
+    if (top < minY - 8) {
+      Scrollable.ensureVisible(ctx, alignment: 0.0, duration: Duration.zero);
+    }
+    _revealedFor = token;
   }
 }
 
@@ -398,13 +467,12 @@ class _Bubble extends StatelessWidget {
                       children: [
                         for (final path in message.imagePaths)
                           if (File(path).existsSync())
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.file(
-                                File(path),
-                                height: 140,
-                                fit: BoxFit.cover,
-                              ),
+                            _ChatImageThumb(
+                              path: path,
+                              gallery: [
+                                for (final p in message.imagePaths)
+                                  if (File(p).existsSync()) p,
+                              ],
                             ),
                       ],
                     ),
@@ -457,10 +525,7 @@ class _Bubble extends StatelessWidget {
                                 visualDensity: VisualDensity.compact,
                                 onPressed: () =>
                                     _copyReply(context, message.text),
-                                icon: const Icon(
-                                  Icons.copy_outlined,
-                                  size: 18,
-                                ),
+                                icon: const Icon(Icons.copy_outlined, size: 18),
                               ),
                           ],
                         ),
@@ -471,6 +536,152 @@ class _Bubble extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ChatImageThumb extends StatelessWidget {
+  const _ChatImageThumb({required this.path, required this.gallery});
+
+  final String path;
+  final List<String> gallery;
+
+  @override
+  Widget build(BuildContext context) {
+    return SelectionContainer.disabled(
+      child: Tooltip(
+        message: '查看图片',
+        child: MouseRegion(
+          cursor: SystemMouseCursors.click,
+          child: GestureDetector(
+            key: Key('chat-image-$path'),
+            onTap: () =>
+                _openImageViewer(context, path: path, gallery: gallery),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: _fileImage(path, width: 160, height: 140, cover: true),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Widget tests skip file codecs; they hang AutomatedTestWidgetsFlutterBinding.
+@visibleForTesting
+bool debugChatImagePlaceholder = false;
+
+Widget _fileImage(
+  String path, {
+  required double width,
+  required double height,
+  bool cover = false,
+}) {
+  if (debugChatImagePlaceholder) {
+    return SizedBox(
+      width: width,
+      height: height,
+      child: const ColoredBox(
+        color: Color(0xFF44555F),
+        child: Icon(Icons.image, color: Colors.white70),
+      ),
+    );
+  }
+  return Image.file(
+    File(path),
+    width: width,
+    height: height,
+    fit: cover ? BoxFit.cover : BoxFit.contain,
+    errorBuilder: (context, error, stack) => SizedBox(
+      width: width,
+      height: height,
+      child: const ColoredBox(
+        color: Color(0x33000000),
+        child: Icon(Icons.broken_image_outlined),
+      ),
+    ),
+  );
+}
+
+void _openImageViewer(
+  BuildContext context, {
+  required String path,
+  required List<String> gallery,
+}) {
+  final paths = gallery.isEmpty ? [path] : gallery;
+  var index = paths.indexOf(path);
+  if (index < 0) index = 0;
+  Navigator.of(context).push(
+    MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (_) => _ImageViewerPage(paths: paths, initialIndex: index),
+    ),
+  );
+}
+
+class _ImageViewerPage extends StatefulWidget {
+  const _ImageViewerPage({required this.paths, required this.initialIndex});
+
+  final List<String> paths;
+  final int initialIndex;
+
+  @override
+  State<_ImageViewerPage> createState() => _ImageViewerPageState();
+}
+
+class _ImageViewerPageState extends State<_ImageViewerPage> {
+  late final PageController _pages;
+  late int _index;
+
+  @override
+  void initState() {
+    super.initState();
+    _index = widget.initialIndex;
+    _pages = PageController(initialPage: widget.initialIndex);
+  }
+
+  @override
+  void dispose() {
+    _pages.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          tooltip: '关闭',
+          icon: const Icon(Icons.close),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        title: widget.paths.length > 1
+            ? Text('${_index + 1} / ${widget.paths.length}')
+            : const Text('查看图片'),
+      ),
+      body: PageView.builder(
+        controller: _pages,
+        itemCount: widget.paths.length,
+        onPageChanged: (i) => setState(() => _index = i),
+        itemBuilder: (context, i) {
+          return InteractiveViewer(
+            minScale: 0.5,
+            maxScale: 5,
+            child: Center(
+              child: _fileImage(
+                widget.paths[i],
+                width: MediaQuery.sizeOf(context).width,
+                height: MediaQuery.sizeOf(context).height,
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -849,9 +1060,47 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
             onChanged: (v) => widget.store.apiKey = v,
           ),
+          const SizedBox(height: 16),
+          Text('怎么拿到 Key', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 8),
           Text(
-            '在 cursor.com/dashboard/api 创建。只存在这台设备上。',
+            '1. 用能登录 Cursor 的账号，在浏览器打开这个页面：',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 4),
+          SelectableText(
+            kCursorApiKeyUrl,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              key: const Key('copy-api-key-url'),
+              onPressed: () async {
+                await Clipboard.setData(
+                  const ClipboardData(text: kCursorApiKeyUrl),
+                );
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('网址已复制，去浏览器打开'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.copy_outlined, size: 18),
+              label: const Text('复制网址'),
+            ),
+          ),
+          Text(
+            '2. 点 Create API Key，复制以 cursor_ 开头的那一串。',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '3. 粘贴到上面。Key 只存在这台设备上。没有 Cursor 账号，或账号还不能用 Cloud Agents，网页上会创建失败。',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 20),
@@ -861,15 +1110,32 @@ class _SettingsPageState extends State<SettingsPage> {
             listenable: widget.store,
             builder: (context, _) {
               final models = widget.store.models;
-              if (widget.store.loadingModels) {
-                return const LinearProgressIndicator();
-              }
               if (models.isEmpty) {
-                return const Text('保存 Key 后会自动拉取可用模型。');
+                if (widget.store.loadingModels) {
+                  return const LinearProgressIndicator();
+                }
+                return Text(
+                  widget.store.modelsError ?? '点下面保存并刷新，会去拉可用模型；失败会自动再试。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                );
               }
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  if (widget.store.loadingModels)
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12),
+                      child: LinearProgressIndicator(),
+                    ),
+                  if (widget.store.modelsError != null) ...[
+                    Text(
+                      widget.store.modelsError!,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
                   DropdownMenu<String>(
                     key: ValueKey('model-${widget.store.modelId}'),
                     expandedInsets: EdgeInsets.zero,
@@ -910,15 +1176,38 @@ class _SettingsPageState extends State<SettingsPage> {
             '已开始的对话沿用当时的模型；改档位后请开新对话。',
             style: Theme.of(context).textTheme.bodySmall,
           ),
+          const SizedBox(height: 8),
+          Text(
+            '已经有模型列表就不必反复去拉。换了 Key，或想更新目录，再点保存并刷新。',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
           const SizedBox(height: 24),
-          FilledButton(
-            onPressed: () async {
-              widget.store.apiKey = _key.text;
-              await widget.store.saveSettings();
-              await widget.store.refreshModels();
-              if (context.mounted) Navigator.pop(context);
+          ListenableBuilder(
+            listenable: widget.store,
+            builder: (context, _) {
+              final busy = widget.store.loadingModels;
+              return FilledButton(
+                onPressed: busy
+                    ? null
+                    : () async {
+                        widget.store.apiKey = _key.text;
+                        await widget.store.saveSettings();
+                        await widget.store.refreshModels(force: true);
+                        if (!context.mounted) return;
+                        if (widget.store.models.isNotEmpty) {
+                          if (widget.store.modelsError != null) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(widget.store.modelsError!),
+                              ),
+                            );
+                          }
+                          Navigator.pop(context);
+                        }
+                      },
+                child: Text(busy ? '正在刷新…' : '保存并刷新模型'),
+              );
             },
-            child: const Text('保存'),
           ),
         ],
       ),

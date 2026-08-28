@@ -75,6 +75,37 @@ void main() {
     expect(m.alignedParams({'effort': 'high'})['effort'], 'high');
   });
 
+  test('catalog json round-trips enough to restore pickers', () {
+    final m = CursorModel.fromJson({
+      'id': 'composer-2.5',
+      'displayName': 'Composer 2.5',
+      'parameters': [
+        {
+          'id': 'fast',
+          'displayName': 'Fast',
+          'values': [
+            {'value': 'false'},
+            {'value': 'true', 'displayName': 'Fast'},
+          ],
+        },
+      ],
+      'variants': [
+        {
+          'params': [
+            {'id': 'fast', 'value': 'true'},
+          ],
+          'displayName': 'Composer 2.5',
+          'isDefault': true,
+        },
+      ],
+    });
+    final restored = CursorModel.fromJson(m.toJson());
+    expect(restored.id, m.id);
+    expect(restored.displayName, m.displayName);
+    expect(restored.parameters.single.id, 'fast');
+    expect(restored.alignedParams({})['fast'], 'true');
+  });
+
   test('router model only accepts optimize_for', () {
     final m = CursorModel.fromJson({
       'id': 'auto-smart',
