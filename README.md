@@ -41,13 +41,9 @@ phone  →  POST /v1/agents          (first turn, no repository field)
        →  GET  …/runs/{id}/stream    (SSE; 410 / dropped socket → poll GET)
 ```
 
-The first prompt is not what you typed. The client prepends a system-style prefix (`kFirstTurnPrefix` in `lib/api/cursor_api.dart`) that tells the agent it is a phone assistant, plus a clock / `recencyPreamble` that asks it to search the web for versions, news, and prices. Follow-ups only add the recency line.
+Images: base64 on the prompt, max 12 MB. Cloud-side, Cursor still stores the agent; deleting a chat here does not delete the agent on their servers.
 
-第一条提示词不是你打的原文。客户端会加上系统式前缀（`lib/api/cursor_api.dart` 里的 `kFirstTurnPrefix`），告诉 Agent 它是手机助手，再加一段时钟 / `recencyPreamble`，让它去网上搜版本、新闻和价格。追问只加时效那一行。
-
-API key: `SharedPreferences`. Threads: `conversations.json` in app documents. Images: base64 on the prompt, max 12 MB. Cloud-side, Cursor still stores the agent; deleting a chat here does not delete the agent on their servers.
-
-API Key 存在 `SharedPreferences`。会话在应用文档目录的 `conversations.json`。图片以 base64 附在提示词上，最大 12 MB。云端 Cursor 仍会保存 Agent；这里删对话不会删他们服务器上的 Agent。
+图片以 base64 附在提示词上，最大 12 MB。云端 Cursor 仍会保存 Agent；这里删对话不会删他们服务器上的 Agent。
 
 ## Limitations / 局限性
 
