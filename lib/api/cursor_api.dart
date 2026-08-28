@@ -5,6 +5,8 @@ import 'dart:io';
 import '../models/models.dart';
 import 'sse.dart';
 
+const kCursorApiKeyUrl = 'https://cursor.com/dashboard/api';
+
 class CreatedAgent {
   const CreatedAgent({required this.agentId, required this.runId, this.name});
   final String agentId;
@@ -118,6 +120,32 @@ class CursorModel {
       defaultParams: defaultParams,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'displayName': displayName,
+    'parameters': [
+      for (final p in parameters)
+        {
+          'id': p.id,
+          'displayName': p.displayName,
+          'values': [
+            for (final v in p.values)
+              {'value': v.value, 'displayName': v.displayName},
+          ],
+        },
+    ],
+    'variants': [
+      for (final v in variants)
+        {
+          'displayName': v.displayName,
+          'isDefault': v.isDefault,
+          'params': [
+            for (final e in v.params.entries) {'id': e.key, 'value': e.value},
+          ],
+        },
+    ],
+  };
 
   /// Only ids this model advertises; drops leftover params from the previous model.
   Map<String, String> alignedParams(Map<String, String> current) {

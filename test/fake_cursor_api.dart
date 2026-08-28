@@ -16,6 +16,10 @@ class FakeCursorApi extends CursorApi {
   /// When true, every createRun fails with a network error (createAgent still works).
   bool failRuns = false;
   int seq = 0;
+  int listModelsCalls = 0;
+  int listModelsFailTimes = 0;
+  Object? listModelsError;
+  List<CursorModel> catalog = const [];
 
   Completer<String> _openStream(String runId) {
     final existing = streams[runId];
@@ -36,7 +40,17 @@ class FakeCursorApi extends CursorApi {
   }
 
   @override
-  Future<List<CursorModel>> listModels() async => const [];
+  Future<List<CursorModel>> listModels() async {
+    listModelsCalls++;
+    if (listModelsFailTimes > 0) {
+      listModelsFailTimes--;
+      throw listModelsError ?? CursorApiException(0, 'Connection reset');
+    }
+    if (listModelsError != null) {
+      throw listModelsError!;
+    }
+    return catalog;
+  }
 
   @override
   Future<CreatedAgent> createAgent({

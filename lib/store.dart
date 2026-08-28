@@ -24,9 +24,26 @@ class ChatStore extends ChangeNotifier {
   final Set<String> _inFlight = {};
   String? error;
   String? errorChatId;
+  String? modelsError;
   bool loadingModels = false;
   int _wakeLocks = 0;
   Future<void> _persistChain = Future.value();
+  Future<void>? _modelsInFlight;
+  Timer? _modelsRetryTimer;
+
+  /// Extra pauses between listModels attempts. Empty means a single try.
+  @visibleForTesting
+  List<Duration> modelsRetryDelays = const [
+    Duration(milliseconds: 800),
+    Duration(seconds: 2),
+  ];
+
+  /// After the retry loop still has no catalog, wait and try again.
+  @visibleForTesting
+  Duration modelsRescheduleDelay = const Duration(seconds: 12);
+
+  @visibleForTesting
+  bool rescheduleModelsOnFailure = true;
 
   bool isSending(String? id) => id != null && _inFlight.contains(id);
 
@@ -51,7 +68,11 @@ class ChatStore extends ChangeNotifier {
 
   String get modelSummary {
     final m = selectedModel;
-    if (m == null) return '选择模型';
+    if (m == null) {
+      if (loadingModels) return '正在加载模型…';
+      if (modelId.isNotEmpty) return modelId;
+      return '选择模型';
+    }
     final bits = <String>[m.displayName];
     for (final p in m.parameters) {
       final v = modelParams[p.id];
@@ -100,6 +121,17 @@ class ChatStore extends ChangeNotifier {
         modelParams = {for (final e in decoded.entries) e.key: '${e.value}'};
       } catch (_) {}
     }
+    final rawModels = prefs.getString('models');
+    if (rawModels != null && rawModels.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawModels) as List;
+        models = [
+          for (final m in decoded)
+            CursorModel.fromJson(Map<String, dynamic>.from(m as Map)),
+        ];
+        _sanitizeParams(selectedModel);
+      } catch (_) {}
+    }
     try {
       final dir = await getApplicationDocumentsDirectory();
       final file = File('${dir.path}/conversations.json');
@@ -117,7 +149,7 @@ class ChatStore extends ChangeNotifier {
     } catch (_) {}
     if (conversations.isEmpty) newChat();
     notifyListeners();
-    unawaited(refreshModels());
+    if (models.isEmpty) unawaited(refreshModels());
     unawaited(resumeInFlight());
   }
 
@@ -126,39 +158,98 @@ class ChatStore extends ChangeNotifier {
     await prefs.setString('apiKey', apiKey.trim());
     await prefs.setString('modelId', modelId);
     await prefs.setString('modelParams', jsonEncode(modelParams));
+    if (models.isNotEmpty) {
+      await prefs.setString(
+        'models',
+        jsonEncode([for (final m in models) m.toJson()]),
+      );
+    }
     notifyListeners();
   }
 
-  Future<void> refreshModels() async {
+  Future<void> refreshModels({bool force = false}) {
+    if (!force && models.isNotEmpty) return Future.value();
+    return _modelsInFlight ??= _refreshModelsBody().whenComplete(() {
+      _modelsInFlight = null;
+    });
+  }
+
+  Future<void> _refreshModelsBody() async {
     final api = _api;
     if (api == null) return;
+    _modelsRetryTimer?.cancel();
     loadingModels = true;
     notifyListeners();
-    try {
-      models = await api.listModels();
-      if (modelId.isEmpty || !models.any((m) => m.id == modelId)) {
-        CursorModel pick = models.first;
-        for (final m in models) {
-          if (m.id == 'composer-2.5' || m.id == 'composer-2') {
-            pick = m;
-            break;
-          }
+    Object? lastError;
+    var attempt = 0;
+    while (true) {
+      try {
+        final next = await api.listModels();
+        if (next.isEmpty) {
+          lastError = CursorApiException(0, 'empty catalog');
+        } else {
+          _applyCatalog(next);
+          modelsError = null;
+          loadingModels = false;
+          notifyListeners();
+          await saveSettings();
+          return;
         }
-        selectModel(pick.id, persist: false);
-      } else {
-        _sanitizeParams(selectedModel);
+      } catch (e) {
+        lastError = e;
+        if (!_shouldRetryModels(e)) break;
       }
-      error = null;
-    } on CursorApiException catch (e) {
-      error = '无法拉取模型列表：${e.status}';
-      errorChatId = null;
-    } catch (e) {
-      error = e.toString();
-      errorChatId = null;
-    } finally {
-      loadingModels = false;
-      notifyListeners();
+      if (attempt >= modelsRetryDelays.length) break;
+      await Future<void>.delayed(modelsRetryDelays[attempt]);
+      attempt++;
     }
+    modelsError = _friendlyModelsError(lastError);
+    loadingModels = false;
+    notifyListeners();
+    if (models.isEmpty) _armModelsRetry();
+  }
+
+  void _applyCatalog(List<CursorModel> next) {
+    models = next;
+    if (modelId.isEmpty || !models.any((m) => m.id == modelId)) {
+      CursorModel pick = models.first;
+      for (final m in models) {
+        if (m.id == 'composer-2.5' || m.id == 'composer-2') {
+          pick = m;
+          break;
+        }
+      }
+      selectModel(pick.id, persist: false);
+    } else {
+      _sanitizeParams(selectedModel);
+    }
+  }
+
+  bool _shouldRetryModels(Object e) {
+    if (e is CursorApiException && (e.status == 401 || e.status == 403)) {
+      return false;
+    }
+    return true;
+  }
+
+  String _friendlyModelsError(Object? e) {
+    if (e is CursorApiException && (e.status == 401 || e.status == 403)) {
+      return '这个 Key 好像不对。请到网页重新创建再粘贴。';
+    }
+    if (e != null && isTransientNetworkError(e)) {
+      return '模型列表暂时没拉到，会自动再试。有缓存的话可以继续用。';
+    }
+    return '模型列表暂时没拉到，会自动再试。';
+  }
+
+  void _armModelsRetry() {
+    _modelsRetryTimer?.cancel();
+    if (!rescheduleModelsOnFailure || models.isNotEmpty || _api == null) {
+      return;
+    }
+    _modelsRetryTimer = Timer(modelsRescheduleDelay, () {
+      unawaited(refreshModels());
+    });
   }
 
   void selectModel(String id, {bool persist = true}) {
