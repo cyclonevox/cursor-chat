@@ -1,29 +1,97 @@
 # Cursor Chat
 
-自用的 ChatGPT 式客户端，走 Cursor Cloud Agents HTTP API。文字、相册、拍照都可以，不绑仓库。
+Unofficial Flutter client for the [Cursor Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints). ChatGPT-style chat on **Android** and **Linux** — no repo binding, no IDE.
 
-## 功能
+Cursor still has no Android app, only a browser. This is a native client for that gap: paste an API key, talk, send photos, continue the same thread.
 
-- 设置里粘贴 [API Key](https://cursor.com/dashboard/api)
-- 会话列表（每条对话对应一个 Cloud Agent）
-- 发文字 / 相册图 / 拍照（安卓）
-- 同一条对话里继续问
-- 记录只存在本机
+非官方 Flutter 客户端，走 [Cursor Cloud Agents HTTP API](https://cursor.com/docs/cloud-agent/api/endpoints)。Cursor 一直没有安卓端，只有浏览器；这个应用把同一套云端对话接到手机上。
 
-## 电脑上调试
+> Not affiliated with Anysphere / Cursor. You need your own [Cursor API key](https://cursor.com/dashboard/api), and an account that can create **no-repo** Cloud Agents.
+
+## Features
+
+- Paste an API key in Settings; it stays on the device
+- Conversation list — each chat is one Cloud Agent
+- Text, gallery images, and camera (Android)
+- Follow-ups in the same thread; retry if the network drops
+- Model picker + Fast / thinking params from the live catalog
+- Markdown / math in replies
+- History stored locally, not in this repo
+
+## Requirements
+
+- [Flutter](https://flutter.dev) 3.44+ (Dart 3.12)
+- A Cursor account with Cloud Agents API access
+- Android: SDK for `flutter build apk`
+- Linux: GTK desktop target (`flutter run -d linux`)
+
+## Get an API key
+
+1. Open [cursor.com/dashboard/api](https://cursor.com/dashboard/api)
+2. Create a key (`cursor_…`)
+3. In the app: **Settings → paste key → Save**
+4. Models load automatically. Start a new chat after changing model or params.
+
+## Install on Android
 
 ```bash
-cd ~/dev/cursor-chat
+git clone https://github.com/cyclonevox/cursor-chat.git
+cd cursor-chat
+flutter pub get
+flutter build apk --release
+```
+
+APK path: `build/app/outputs/flutter-apk/app-release.apk`
+
+The release build currently signs with the **debug** keystore so `flutter run --release` works. Do not ship that APK to a store; add your own signing config first.
+
+## Run on Linux (debug)
+
+```bash
 flutter run -d linux
 ```
 
-Linux 没有相机按钮，用相册/文件选择加图。
+Linux has no camera button; attach images with the gallery / file picker.
 
-## 装到手机
+## How it works
+
+The app talks to `https://api.cursor.com`:
+
+- `GET /v1/models` — catalog and parameters
+- `POST /v1/agents` — new chat (no repository)
+- `POST /v1/agents/{id}/runs` — follow-up
+- SSE stream on the run, with HTTP poll fallback
+
+API key and conversations live in app storage (`SharedPreferences` + a local JSON file). Nothing is uploaded except the prompts you send to Cursor.
+
+## Development
+
+```bash
+flutter test
+dart analyze
+```
+
+Optional live smoke (does not print the key):
+
+```bash
+CURSOR_API_KEY=cursor_… dart run tool/live_qa.dart
+```
+
+## 中文摘要
+
+Cursor 没有安卓 App，网页版用起来别扭。这个仓库是一个 ChatGPT 式的原生客户端：设置里粘贴 [API Key](https://cursor.com/dashboard/api)，就可以在手机上开对话、发图、拍照、继续追问。每条会话对应一个不绑仓库的 Cloud Agent；Key 和聊天记录只存在本机。
 
 ```bash
 flutter build apk --release
-# 产物：build/app/outputs/flutter-apk/app-release.apk
+# build/app/outputs/flutter-apk/app-release.apk
 ```
 
-手机打开 App → 设置 → 填 Key → 保存。账号需要能创建 **no-repo** Cloud Agent。
+当前 release 用的是 debug 签名，方便自己装；上架前请换成自己的 keystore。
+
+## License
+
+[MIT](LICENSE)
+
+## Disclaimer
+
+This project is unofficial. Cursor, Cloud Agents, and related marks belong to their owners. Using the API is subject to Cursor’s terms and billing.
