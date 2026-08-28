@@ -12,20 +12,12 @@ Paste an API key and talk to **no-repo** Cloud Agents.
 
 ## Features / 功能
 
-- Paste an API key in Settings; it stays on the device.
-设置里粘贴 API Key，只留在本机。
 - Conversation list — each chat is one Cloud Agent.
 会话列表，每条对话对应一个 Cloud Agent。
-- Text, gallery images, and camera (Android).
+- Text, gallery images, and camera (Android).  
 文字、相册图片；安卓可用相机。
-- Follow-ups in the same thread; retry if the network drops.
-同一线程里追问；断网可重试。
-- Model picker + Fast / thinking params from the live catalog.
+- Model picker + Fast / thinking params from the live catalog.  
 模型选择，以及在线目录里的 Fast / 思考参数。
-- Markdown / math in replies.
-回复支持 Markdown / 公式。
-- History stored locally, not in this repo.
-历史存在本地，不进这个仓库。
 
 
 
