@@ -11,11 +11,14 @@ import 'package:path_provider/path_provider.dart';
 
 import 'models/models.dart';
 import 'store.dart';
+import 'theme.dart';
 import 'widgets/answer_body.dart';
+import 'widgets/frosted.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SemanticsBinding.instance.ensureSemantics();
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   final store = ChatStore();
   await store.load();
   runApp(ChatApp(store: store));
@@ -52,21 +55,11 @@ class _ChatAppState extends State<ChatApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    const seed = Color(0xFF10A37F);
     return MaterialApp(
       title: 'Cursor Chat',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: seed),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: seed,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: appTheme(Brightness.light),
+      darkTheme: appTheme(Brightness.dark),
       home: ChatHome(store: widget.store),
     );
   }
@@ -83,93 +76,142 @@ class ChatHome extends StatelessWidget {
       listenable: store,
       builder: (context, _) {
         final conv = store.active;
-        return Scaffold(
-          drawer: ConversationDrawer(store: store),
-          appBar: AppBar(
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(conv?.title ?? 'Cursor Chat'),
-                if (store.models.isNotEmpty)
-                  Text(
-                    store.modelSummary,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
+        final scheme = Theme.of(context).colorScheme;
+        return AnnotatedRegion<SystemUiOverlayStyle>(
+          value: overlayFor(Theme.of(context).brightness),
+          child: Scaffold(
+            extendBody: true,
+            extendBodyBehindAppBar: true,
+            drawer: ConversationDrawer(store: store),
+            appBar: AppBar(
+              flexibleSpace: const FrostedBar(),
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(conv?.title ?? 'Cursor Chat'),
+                  if (store.models.isNotEmpty)
+                    Text(
+                      store.modelSummary,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
+              ),
+              actions: [
+                IconButton(
+                  tooltip: '新对话',
+                  onPressed: store.newChat,
+                  icon: const Icon(Icons.edit_square),
+                ),
+                IconButton(
+                  tooltip: '设置',
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => SettingsPage(store: store),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.settings_outlined),
+                ),
               ],
             ),
-            actions: [
-              IconButton(
-                tooltip: '新对话',
-                onPressed: store.newChat,
-                icon: const Icon(Icons.edit_square),
-              ),
-              IconButton(
-                tooltip: '设置',
-                onPressed: () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => SettingsPage(store: store),
-                    ),
-                  );
-                },
-                icon: const Icon(Icons.settings_outlined),
-              ),
-            ],
-          ),
-          body: Column(
-            children: [
-              if (store.apiKey.trim().isEmpty)
-                MaterialBanner(
-                  content: const Text('先在设置里填入 Cursor API Key，才能发消息。'),
-                  actions: [
-                    TextButton(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute<void>(
-                            builder: (_) => SettingsPage(store: store),
-                          ),
-                        );
-                      },
-                      child: const Text('去设置'),
-                    ),
-                  ],
-                ),
-              if (store.visibleError != null)
-                Material(
-                  color: Theme.of(context).colorScheme.errorContainer,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            store.visibleError!,
-                            style: TextStyle(
-                              color: Theme.of(
-                                context,
-                              ).colorScheme.onErrorContainer,
+            body: Stack(
+              children: [
+                _MessageList(store: store),
+                if (store.apiKey.trim().isEmpty || store.visibleError != null)
+                  Align(
+                    alignment: Alignment.topCenter,
+                    child: SafeArea(
+                      bottom: false,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: kToolbarHeight),
+                        child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (store.apiKey.trim().isEmpty)
+                            FrostedSurface(
+                              sigma: 24,
+                              tint: scheme.surface.withValues(alpha: 0.7),
+                              border: Border(
+                                bottom: BorderSide(
+                                  color: scheme.outline.withValues(alpha: 0.25),
+                                ),
+                              ),
+                              child: MaterialBanner(
+                                backgroundColor: Colors.transparent,
+                                surfaceTintColor: Colors.transparent,
+                                dividerColor: Colors.transparent,
+                                content: const Text(
+                                  '先在设置里填入 Cursor API Key，才能发消息。',
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () {
+                                      Navigator.of(context).push(
+                                        MaterialPageRoute<void>(
+                                          builder: (_) =>
+                                              SettingsPage(store: store),
+                                        ),
+                                      );
+                                    },
+                                    child: const Text('去设置'),
+                                  ),
+                                ],
+                              ),
                             ),
-                          ),
+                          if (store.visibleError != null)
+                            FrostedSurface(
+                              sigma: 24,
+                              tint: scheme.errorContainer.withValues(
+                                alpha: 0.72,
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  16,
+                                  8,
+                                  4,
+                                  8,
+                                ),
+                                child: Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        store.visibleError!,
+                                        style: TextStyle(
+                                          color: scheme.onErrorContainer,
+                                        ),
+                                      ),
+                                    ),
+                                    if (store.canRetryLast)
+                                      TextButton(
+                                        key: const Key('retry-error-banner'),
+                                        onPressed: () =>
+                                            unawaited(store.retryLast()),
+                                        child: const Text('重发'),
+                                      ),
+                                    IconButton(
+                                      onPressed: store.clearError,
+                                      icon: const Icon(Icons.close),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
                         ),
-                        if (store.canRetryLast)
-                          TextButton(
-                            key: const Key('retry-error-banner'),
-                            onPressed: () => unawaited(store.retryLast()),
-                            child: const Text('重发'),
-                          ),
-                        IconButton(
-                          onPressed: store.clearError,
-                          icon: const Icon(Icons.close),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Composer(store: store),
                 ),
-              Expanded(child: _MessageList(store: store)),
-              Composer(store: store),
-            ],
+              ],
+            ),
           ),
         );
       },
@@ -184,47 +226,67 @@ class ConversationDrawer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     return Drawer(
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.edit_square),
-              title: const Text('新对话'),
-              onTap: () {
-                store.newChat();
-                Navigator.pop(context);
-              },
-            ),
-            const Divider(height: 1),
-            Expanded(
-              child: ListView.builder(
-                itemCount: store.conversations.length,
-                itemBuilder: (context, i) {
-                  final c = store.conversations[i];
-                  final selected = c.id == store.active?.id;
-                  return ListTile(
-                    selected: selected,
-                    title: Text(
-                      c.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    subtitle: store.isSending(c.id) ? const Text('回复中…') : null,
-                    onTap: () {
-                      store.selectChat(c.id);
-                      Navigator.pop(context);
-                    },
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () => store.deleteChat(c.id),
-                    ),
-                  );
+      child: FrostedSurface(
+        sigma: 36,
+        tint: scheme.surface.withValues(
+          alpha: Theme.of(context).brightness == Brightness.dark ? 0.58 : 0.72,
+        ),
+        child: Material(
+          type: MaterialType.transparency,
+          child: SafeArea(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 12, 8),
+                child: Text(
+                  '对话',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.edit_square),
+                title: const Text('新对话'),
+                onTap: () {
+                  store.newChat();
+                  Navigator.pop(context);
                 },
               ),
-            ),
-          ],
+              Divider(height: 1, color: scheme.outline.withValues(alpha: 0.3)),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: store.conversations.length,
+                  itemBuilder: (context, i) {
+                    final c = store.conversations[i];
+                    final selected = c.id == store.active?.id;
+                    return ListTile(
+                      selected: selected,
+                      selectedTileColor: scheme.primary.withValues(alpha: 0.14),
+                      title: Text(
+                        c.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: store.isSending(c.id)
+                          ? const Text('回复中…')
+                          : null,
+                      onTap: () {
+                        store.selectChat(c.id);
+                        Navigator.pop(context);
+                      },
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => store.deleteChat(c.id),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+          ),
         ),
       ),
     );
@@ -241,19 +303,24 @@ class _MessageList extends StatelessWidget {
     final conv = store.active;
     final messages = conv?.messages ?? const <ChatMessage>[];
     if (messages.isEmpty) {
-      return const Center(
+      return Center(
         child: Padding(
-          padding: EdgeInsets.all(32),
+          padding: const EdgeInsets.fromLTRB(32, 96, 32, 160),
           child: Text(
             '有问题就问，也可以拍照。\n拍题、日常问答、工作上都行。',
             textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+              height: 1.5,
+            ),
           ),
         ),
       );
     }
+    final topPad = MediaQuery.paddingOf(context).top + kToolbarHeight + 12;
     return SelectionArea(
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        padding: EdgeInsets.fromLTRB(16, topPad, 16, 132),
         itemCount: messages.length,
         itemBuilder: (context, i) => _Bubble(
           key: ValueKey(messages[i].id),
@@ -295,20 +362,29 @@ class _Bubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = message.role == 'user';
     final scheme = Theme.of(context).colorScheme;
+    final radius = BorderRadius.only(
+      topLeft: const Radius.circular(18),
+      topRight: const Radius.circular(18),
+      bottomLeft: Radius.circular(isUser ? 18 : 4),
+      bottomRight: Radius.circular(isUser ? 4 : 18),
+    );
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.86,
+          maxWidth: MediaQuery.sizeOf(context).width * (isUser ? 0.82 : 0.92),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.symmetric(vertical: 5),
           child: DecoratedBox(
             decoration: BoxDecoration(
               color: isUser
-                  ? scheme.primaryContainer
-                  : scheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(16),
+                  ? scheme.primaryContainer.withValues(alpha: 0.88)
+                  : scheme.surfaceContainerHigh.withValues(alpha: 0.72),
+              borderRadius: radius,
+              border: Border.all(
+                color: scheme.outline.withValues(alpha: isUser ? 0.12 : 0.22),
+              ),
             ),
             child: Padding(
               padding: const EdgeInsets.all(12),
@@ -536,8 +612,9 @@ class _ComposerState extends State<Composer> {
         uiSettings: [
           AndroidUiSettings(
             toolbarTitle: '裁切',
-            toolbarColor: const Color(0xFF10A37F),
+            toolbarColor: const Color(0xFF121212),
             toolbarWidgetColor: Colors.white,
+            activeControlsWidgetColor: const Color(0xFF5EEAD4),
             lockAspectRatio: false,
             initAspectRatio: CropAspectRatioPreset.original,
             statusBarLight: false,
@@ -587,112 +664,134 @@ class _ComposerState extends State<Composer> {
   @override
   Widget build(BuildContext context) {
     final busy = widget.store.sending;
+    final scheme = Theme.of(context).colorScheme;
+    final dark = Theme.of(context).brightness == Brightness.dark;
     return SafeArea(
       top: false,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_images.isNotEmpty)
-              SizedBox(
-                height: 72,
-                child: ListView.separated(
-                  scrollDirection: Axis.horizontal,
-                  itemCount: _images.length,
-                  separatorBuilder: (_, _) => const SizedBox(width: 8),
-                  itemBuilder: (context, i) {
-                    final img = _images[i];
-                    return Stack(
-                      children: [
-                        if (img.path != null)
-                          GestureDetector(
-                            onTap: busy ? null : () => _recropAt(i),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.file(
-                                File(img.path!),
-                                width: 72,
-                                height: 72,
-                                fit: BoxFit.cover,
+        padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+        child: FrostedSurface(
+          sigma: 34,
+          tint: scheme.surface.withValues(alpha: dark ? 0.48 : 0.66),
+          borderRadius: BorderRadius.circular(28),
+          border: Border.all(color: scheme.outline.withValues(alpha: 0.32)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(6, 8, 6, 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_images.isNotEmpty)
+                  SizedBox(
+                    height: 72,
+                    child: ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _images.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 8),
+                      itemBuilder: (context, i) {
+                        final img = _images[i];
+                        return Stack(
+                          children: [
+                            if (img.path != null)
+                              GestureDetector(
+                                onTap: busy ? null : () => _recropAt(i),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: Image.file(
+                                    File(img.path!),
+                                    width: 72,
+                                    height: 72,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                              ),
+                            Positioned(
+                              right: 0,
+                              top: 0,
+                              child: IconButton.filledTonal(
+                                style: IconButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                                onPressed: () =>
+                                    setState(() => _images.removeAt(i)),
+                                icon: const Icon(Icons.close, size: 16),
                               ),
                             ),
-                          ),
-                        Positioned(
-                          right: 0,
-                          top: 0,
-                          child: IconButton.filledTonal(
-                            style: IconButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                            ),
-                            onPressed: () =>
-                                setState(() => _images.removeAt(i)),
-                            icon: const Icon(Icons.close, size: 16),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    IconButton(
+                      tooltip: '相册',
+                      onPressed: busy
+                          ? null
+                          : () {
+                              if (Platform.isLinux) {
+                                _addFromFiles();
+                              } else {
+                                _addFromPicker(ImageSource.gallery);
+                              }
+                            },
+                      icon: const Icon(Icons.add),
+                    ),
+                    if (!Platform.isLinux)
+                      IconButton(
+                        tooltip: '拍照',
+                        onPressed: busy
+                            ? null
+                            : () => _addFromPicker(ImageSource.camera),
+                        icon: const Icon(Icons.photo_camera_outlined),
+                      ),
+                    Expanded(
+                      child: TextField(
+                        key: const Key('composer-input'),
+                        controller: _controller,
+                        minLines: 1,
+                        maxLines: 6,
+                        textInputAction: TextInputAction.newline,
+                        enabled: !busy,
+                        decoration: const InputDecoration(
+                          hintText: '问点什么…',
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          filled: false,
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 4,
+                            vertical: 10,
                           ),
                         ),
-                      ],
-                    );
-                  },
-                ),
-              ),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                IconButton(
-                  tooltip: '相册',
-                  onPressed: busy
-                      ? null
-                      : () {
-                          if (Platform.isLinux) {
-                            _addFromFiles();
-                          } else {
-                            _addFromPicker(ImageSource.gallery);
-                          }
+                        onSubmitted: (_) {
+                          if (!busy) _send();
                         },
-                  icon: const Icon(Icons.image_outlined),
-                ),
-                if (!Platform.isLinux)
-                  IconButton(
-                    tooltip: '拍照',
-                    onPressed: busy
-                        ? null
-                        : () => _addFromPicker(ImageSource.camera),
-                    icon: const Icon(Icons.photo_camera_outlined),
-                  ),
-                Expanded(
-                  child: TextField(
-                    key: const Key('composer-input'),
-                    controller: _controller,
-                    minLines: 1,
-                    maxLines: 6,
-                    textInputAction: TextInputAction.newline,
-                    enabled: !busy,
-                    decoration: const InputDecoration(
-                      hintText: '问点什么…',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                      ),
                     ),
-                    onSubmitted: (_) {
-                      if (!busy) _send();
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  key: const Key('composer-send'),
-                  tooltip: '发送',
-                  onPressed: busy ? null : _send,
-                  icon: busy
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.arrow_upward),
+                    const SizedBox(width: 4),
+                    IconButton.filled(
+                      key: const Key('composer-send'),
+                      tooltip: '发送',
+                      onPressed: busy ? null : _send,
+                      icon: busy
+                          ? SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: scheme.onPrimary,
+                              ),
+                            )
+                          : const Icon(Icons.arrow_upward),
+                    ),
+                  ],
                 ),
               ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -726,9 +825,18 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('设置')),
+      extendBodyBehindAppBar: true,
+      appBar: AppBar(
+        flexibleSpace: const FrostedBar(),
+        title: const Text('设置'),
+      ),
       body: ListView(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.fromLTRB(
+          16,
+          MediaQuery.paddingOf(context).top + kToolbarHeight + 16,
+          16,
+          32,
+        ),
         children: [
           const Text('Cursor API Key'),
           const SizedBox(height: 8),
