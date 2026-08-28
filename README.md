@@ -13,19 +13,21 @@ Paste an API key and talk to **no-repo** Cloud Agents. Linux works too.
 ## Features / 功能
 
 - Paste an API key in Settings; it stays on the device.
-  设置里粘贴 API Key，只留在本机。
+设置里粘贴 API Key，只留在本机。
 - Conversation list — each chat is one Cloud Agent.
-  会话列表，每条对话对应一个 Cloud Agent。
+会话列表，每条对话对应一个 Cloud Agent。
 - Text, gallery images, and camera (Android).
-  文字、相册图片；安卓可用相机。
+文字、相册图片；安卓可用相机。
 - Follow-ups in the same thread; retry if the network drops.
-  同一线程里追问；断网可重试。
+同一线程里追问；断网可重试。
 - Model picker + Fast / thinking params from the live catalog.
-  模型选择，以及在线目录里的 Fast / 思考参数。
+模型选择，以及在线目录里的 Fast / 思考参数。
 - Markdown / math in replies.
-  回复支持 Markdown / 公式。
+回复支持 Markdown / 公式。
 - History stored locally, not in this repo.
-  历史存在本地，不进这个仓库。
+历史存在本地，不进这个仓库。
+
+
 
 ## How it works / 原理
 
@@ -57,14 +59,6 @@ This is the important part. The UI looks like ChatGPT. The backend is a **coding
 
 **不是聊天模型 API。** Cloud Agents 是给仓库、工具、PR、虚拟机用的。我们不传 `repository`，所以账号必须允许**不绑仓库**的 Agent。创建失败多半是账号没这个权限。Cursor 会不会一直提供不绑仓库的 Agent，没有保证。
 
-**Steering is just extra prompt text.** “Don’t open a PR / don’t dump code” is a prefix, not a product mode. The agent can still reach for tools, talk like an IDE assistant, or ignore the prefix. It is not ChatGPT, Claude.ai, or Cursor Tab.
-
-**「别乱开 PR」只是提示词。** 不是官方聊天模式。Agent 仍可能调用工具、像 IDE 助手那样说话、或忽略前缀。这不是 ChatGPT、Claude.ai，也不是 Cursor Tab。
-
-**Web-freshness is hoped, not guaranteed.** We inject today’s datetime and ask it to search. Whether it actually searches, and whether that search is current, is entirely Cursor’s runtime.
-
-**网上新信息不保证。** 我们会塞进今天的日期并请它搜索。它搜不搜、搜到的新不新，全看 Cursor 运行时。
-
 **One agent ≈ one model.** Model / Fast / thinking are sent on **create**. Changing settings does not rewrite an existing thread. Open a new chat after switching. There is no UI to stop a run (`cancelRun` exists in the client, unused).
 
 **一个 Agent ≈ 一个模型。** 模型 / Fast / 思考参数只在**创建**时发送。改设置不会改已有对话。换完请开新聊天。没有停止 run 的界面（客户端里有 `cancelRun`，没用上）。
@@ -85,17 +79,9 @@ This is the important part. The UI looks like ChatGPT. The backend is a **coding
 
 **图片只是提示词上的附件，不是视觉产品。** 安卓用相册 / 相机，Linux 用文件选择器。没有 Cursor iOS 那种标注。超过 12 MB 的照片会被拒。
 
-**Billing is Cloud Agents, not “chat.”** Usage follows Cursor API / Cloud Agent pricing and spend limits. A long “casual” thread can still be an expensive agent. Unofficial client: if the v1 API moves, this app breaks until we catch up.
-
-**计费按 Cloud Agents，不是「聊天」。** 用量走 Cursor API / Cloud Agent 定价和额度。闲聊长对话也可能很贵。非官方客户端：v1 API 一变，这个应用就会坏，直到跟上。
-
 **iOS features are not here for now.** The iOS app is a first-party agent control surface: repos, plans, diffs, merge, Live Activities, voice, MCP, screenshot annotation, remote control. This client is a thin chat wrapper around `POST /v1/agents` without a repository. Same company API, different product. Don’t expect those surfaces here yet.
 
 **iOS 上那些能力暂时都还没有。** 官方 iOS 是第一方的 Agent 控制面：仓库、计划、diff、合并、Live Activity、语音、MCP、截图标注、远程控制。这个客户端只是对不绑仓库的 `POST /v1/agents` 包了一层聊天界面。同一家公司的 API，不是同一个产品。先别按「安卓上的 Cursor iOS」来预期。
-
-**Frost is cosmetic.** Bars use Flutter `BackdropFilter` over the transcript (niri-like). That is not the compositor blurring your wallpaper through a transparent window.
-
-**毛玻璃只是外观。** 顶栏底栏用 Flutter `BackdropFilter` 模糊对话（有点像 niri）。并不是合成器透过透明窗口去糊壁纸。
 
 ## Development / 开发
 
@@ -109,6 +95,8 @@ Optional live smoke (does not print the key) / 可选的在线冒烟（不会打
 ```bash
 CURSOR_API_KEY=cursor_… dart run tool/live_qa.dart
 ```
+
+
 
 ## License / 许可
 
