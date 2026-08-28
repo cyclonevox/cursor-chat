@@ -232,7 +232,7 @@ void main() {
     debugChatImagePlaceholder = true;
     addTearDown(() => debugChatImagePlaceholder = false);
 
-    const path = '/home/vox/dev/cursor-chat/assets/icon.png';
+    final path = File('assets/icon.png').absolute.path;
     expect(File(path).existsSync(), isTrue);
 
     final store = ChatStore();
@@ -244,7 +244,7 @@ void main() {
 
     await tester.pumpWidget(ChatApp(store: store));
     await tester.pump();
-    await tester.tap(find.byKey(const Key('chat-image-$path')));
+    await tester.tap(find.byKey(Key('chat-image-$path')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 

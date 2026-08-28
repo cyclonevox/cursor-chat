@@ -1,18 +1,66 @@
 name: CI
 
 on:
+  push:
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  apk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.44.8"
           channel: stable
           cache: true
+
       - run: flutter pub get
       - run: dart analyze
       - run: flutter test
+
+      - name: Write upload keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No upload keystore secret; APK will be debug-signed."
+            exit 0
+          fi
+          KEYSTORE="$GITHUB_WORKSPACE/android/app/upload-keystore.jks"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+          {
+            echo "storePassword=$ANDROID_KEYSTORE_PASSWORD"
+            echo "keyPassword=${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            echo "keyAlias=${ANDROID_KEY_ALIAS:-upload}"
+            echo "storeFile=$KEYSTORE"
+          } > android/key.properties
+
+      - name: Build APK
+        run: |
+          VERSION=$(awk '/^version:/ {print $2}' pubspec.yaml | cut -d+ -f1)
+          BUILD=$((10000 + GITHUB_RUN_NUMBER))
+          flutter build apk --release --build-name="$VERSION" --build-number="$BUILD"
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk dist/cursor-chat.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cursor-chat
+          path: dist/cursor-chat.apk
+          if-no-files-found: error
+          retention-days: 14
