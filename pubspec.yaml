@@ -1,5 +1,5 @@
 name: cursor_chat
-description: "方便安卓端进行 Cursor 对话的临时方案，不是 Cursor iOS 的等价替代。Temporary unofficial Android/Linux chat for Cursor Cloud Agents."
+description: "简易的 Cursor 对话安卓客户端。A simple Cursor chat client for Android."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev

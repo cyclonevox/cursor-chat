@@ -1,10 +1,10 @@
 # Cursor Chat
 
-**A temporary way to chat with Cursor on Android (and Linux). Not an equivalent substitute for Cursor iOS.**
+**A simple Cursor chat client for Android.**
 
-Cursor ships a native [iOS app](https://cursor.com/blog/ios-mobile-app). There is still no official Android client, and the web UI is awkward on a phone. This unofficial Flutter app wraps the **Cloud Agents API** as a chat screen: paste an API key and talk to **no-repo** agents. Repos, PRs, Live Activities, voice, MCP, remote desktop control, and the rest of that iOS surface are **not here for now**.
+Paste an API key and talk to **no-repo** Cloud Agents. Linux works too.
 
-**这是方便安卓端进行 Cursor 对话的临时方案（Linux 也能跑），不是 Cursor iOS 的等价替代品。** 官方有 iOS，没有安卓，网页版不好用，所以用 Cloud Agents API 自己接了一层聊天界面。仓库、PR、Live Activity、语音、MCP、远程控制桌面会话等，这里暂时都还没有。
+**简易的 Cursor 对话安卓客户端。** 设置里粘贴 API Key，就能和不绑仓库的 Cloud Agent 聊天。Linux 也能跑。
 
 > Unofficial. Not affiliated with Anysphere / Cursor. You need your own [API key](https://cursor.com/dashboard/api), and an account that can create **no-repo** Cloud Agents.
 >
@@ -116,6 +116,6 @@ CURSOR_API_KEY=cursor_… dart run tool/live_qa.dart
 
 ## Disclaimer / 免责声明
 
-Unofficial temporary client. Not affiliated with Anysphere / Cursor, and **not an equivalent to Cursor for iOS**. Cursor, Cloud Agents, and related marks belong to their owners. Using the API is subject to Cursor’s terms and billing.
+Unofficial. Not affiliated with Anysphere / Cursor. Cursor, Cloud Agents, and related marks belong to their owners. Using the API is subject to Cursor’s terms and billing.
 
-非官方临时方案。与 Anysphere / Cursor 无关，也**不是** Cursor iOS 的等价替代。Cursor、Cloud Agents 及相关标识归其权利人所有。使用 API 须遵守 Cursor 的条款和计费。
+非官方。与 Anysphere / Cursor 无关。Cursor、Cloud Agents 及相关标识归其权利人所有。使用 API 须遵守 Cursor 的条款和计费。
