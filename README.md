@@ -10,20 +10,6 @@ Cursor ships a native [iOS app](https://cursor.com/blog/ios-mobile-app). There i
 >
 > 非官方，与 Anysphere / Cursor 无关。需要自己的 [API Key](https://cursor.com/dashboard/api)，账号还得能创建**不绑仓库**的 Cloud Agent。
 
-## Download / 下载
-
-CI builds **one** APK on every push and pull request. It is **not** published to GitHub Releases.
-
-每次推送或开 PR 都会打 **一个** APK，挂在这次 CI 的 Artifacts 里，**不会**发到 GitHub Releases。
-
-1. Open the run under [Actions](https://github.com/cyclonevox/cursor-chat/actions)
-2. Download the `cursor-chat` artifact (GitHub login required) and unzip it
-3. Install `cursor-chat.apk` (allow unknown sources). Then Settings → paste your API key.
-
-1. 打开 [Actions](https://github.com/cyclonevox/cursor-chat/actions) 里对应那次运行
-2. 下载 Artifacts 里的 `cursor-chat`（需要登录 GitHub）并解压
-3. 安装 `cursor-chat.apk`（允许未知来源），然后到设置里粘贴 API Key
-
 ## Features / 功能
 
 - Paste an API key in Settings; it stays on the device.
@@ -40,50 +26,6 @@ CI builds **one** APK on every push and pull request. It is **not** published to
   回复支持 Markdown / 公式。
 - History stored locally, not in this repo.
   历史存在本地，不进这个仓库。
-
-## Requirements / 环境
-
-- [Flutter](https://flutter.dev) 3.44+ (Dart 3.12)
-- A Cursor account with Cloud Agents API access / 能用 Cloud Agents API 的 Cursor 账号
-- Android: SDK for `flutter build apk`
-- Linux: GTK desktop target (`flutter run -d linux`)
-
-## Get an API key / 获取 API Key
-
-1. Open [cursor.com/dashboard/api](https://cursor.com/dashboard/api)
-2. Create a key (`cursor_…`)
-3. In the app: **Settings → paste key → Save**
-4. Models load automatically. Start a new chat after changing model or params.
-
-1. 打开 [cursor.com/dashboard/api](https://cursor.com/dashboard/api)
-2. 创建密钥（`cursor_…`）
-3. 应用里：**设置 → 粘贴密钥 → 保存**
-4. 模型会自动拉取。改模型或参数后请开新对话。
-
-## Install on Android / 本机打 APK
-
-```bash
-git clone https://github.com/cyclonevox/cursor-chat.git
-cd cursor-chat
-flutter pub get
-flutter build apk --release
-```
-
-APK path / 产出路径：`build/app/outputs/flutter-apk/app-release.apk`
-
-If `android/key.properties` is present, release builds use that upload keystore so later APKs can overwrite-install. Otherwise the APK is debug-signed.
-
-若有 `android/key.properties`，release 会用上传密钥签名，方便以后覆盖安装；否则是 debug 签名。
-
-## Run on Linux (debug) / Linux 调试
-
-```bash
-flutter run -d linux
-```
-
-Linux has no camera button; attach images with the gallery / file picker.
-
-Linux 没有相机按钮，用相册 / 文件选择器附图。
 
 ## How it works / 原理
 
