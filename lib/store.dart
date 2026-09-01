@@ -10,11 +10,24 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'api/cursor_api.dart';
 import 'models/models.dart';
 import 'title.dart';
+import 'voice/create_engine.dart';
+import 'voice/model_store.dart';
+import 'voice/voice_settings.dart';
 
-class ChatStore extends ChangeNotifier {
-  ChatStore({CursorApi? client}) : _client = client;
+class ChatStore extends ChangeNotifier implements VoiceStoreView {
+  ChatStore({this._client, ModelStore? modelStore})
+    : modelStore = modelStore ?? ModelStore();
 
   final CursorApi? _client;
+  @override
+  final ModelStore modelStore;
+  @override
+  VoiceMode voiceMode = VoiceMode.off;
+  @override
+  String localSttId = kDefaultLocalSttId;
+  @override
+  String cloudSttProvider = kDefaultCloudProvider;
+  Map<String, CloudSttSecrets> cloudSecrets = {};
   String apiKey = '';
   String modelId = '';
   Map<String, String> modelParams = {};
@@ -49,6 +62,26 @@ class ChatStore extends ChangeNotifier {
 
   /// True only while the *active* chat is waiting on a reply.
   bool get sending => isSending(activeId);
+
+  @override
+  CloudSttSecrets cloudSecret(String providerId) =>
+      cloudSecrets[providerId] ?? const CloudSttSecrets();
+
+  bool get voiceMicReady {
+    switch (voiceMode) {
+      case VoiceMode.off:
+        return false;
+      case VoiceMode.system:
+        return Platform.isAndroid;
+      case VoiceMode.local:
+        return modelStore.isReady(localSttId);
+      case VoiceMode.cloud:
+        return cloudSecretsReady(
+          cloudSttProvider,
+          cloudSecret(cloudSttProvider),
+        );
+    }
+  }
 
   /// Last bubble is a failed/empty assistant reply that can be sent again.
   bool get canRetryLast => !sending && _retryTarget(active) != null;
@@ -113,6 +146,22 @@ class ChatStore extends ChangeNotifier {
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
     apiKey = prefs.getString('apiKey') ?? '';
+    voiceMode = voiceModeFromId(prefs.getString('voiceMode'));
+    localSttId = prefs.getString('localSttId') ?? kDefaultLocalSttId;
+    cloudSttProvider =
+        prefs.getString('cloudSttProvider') ?? kDefaultCloudProvider;
+    final rawCloud = prefs.getString('cloudSttSecrets');
+    if (rawCloud != null && rawCloud.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(rawCloud) as Map<String, dynamic>;
+        cloudSecrets = {
+          for (final e in decoded.entries)
+            e.key: CloudSttSecrets.fromJson(
+              Map<String, dynamic>.from(e.value as Map),
+            ),
+        };
+      } catch (_) {}
+    }
     modelId = prefs.getString('modelId') ?? '';
     final rawParams = prefs.getString('modelParams');
     if (rawParams != null && rawParams.isNotEmpty) {
@@ -149,6 +198,9 @@ class ChatStore extends ChangeNotifier {
     } catch (_) {}
     if (conversations.isEmpty) newChat();
     notifyListeners();
+    unawaited(
+      modelStore.refreshAll().then((_) => notifyListeners()).catchError((_) {}),
+    );
     if (models.isEmpty) unawaited(refreshModels());
     unawaited(resumeInFlight());
   }
@@ -156,6 +208,16 @@ class ChatStore extends ChangeNotifier {
   Future<void> saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('apiKey', apiKey.trim());
+    await prefs.setString('voiceMode', voiceMode.id);
+    await prefs.setString('localSttId', localSttId);
+    await prefs.setString('cloudSttProvider', cloudSttProvider);
+    await prefs.setString(
+      'cloudSttSecrets',
+      jsonEncode({
+        for (final e in cloudSecrets.entries)
+          if (!e.value.isEmpty) e.key: e.value.toJson(),
+      }),
+    );
     await prefs.setString('modelId', modelId);
     await prefs.setString('modelParams', jsonEncode(modelParams));
     if (models.isNotEmpty) {
@@ -264,6 +326,48 @@ class ChatStore extends ChangeNotifier {
     modelParams[id] = value;
     notifyListeners();
     unawaited(saveSettings());
+  }
+
+  void setVoiceMode(VoiceMode mode) {
+    voiceMode = mode;
+    if (mode == VoiceMode.system && !Platform.isAndroid) {
+      voiceMode = VoiceMode.off;
+    }
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  void setLocalSttId(String id) {
+    localSttId = id;
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  void setCloudSttProvider(String id) {
+    cloudSttProvider = id;
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  void setCloudSecret(String providerId, CloudSttSecrets secrets) {
+    cloudSecrets[providerId] = secrets;
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  Future<void> downloadLocalStt(String id) async {
+    await modelStore.download(id);
+    notifyListeners();
+  }
+
+  Future<void> cancelLocalSttDownload(String id) async {
+    await modelStore.cancelDownload(id);
+    notifyListeners();
+  }
+
+  Future<void> deleteLocalStt(String id) async {
+    await modelStore.deleteModel(id);
+    notifyListeners();
   }
 
   void _sanitizeParams(CursorModel? m) {

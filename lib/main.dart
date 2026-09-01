@@ -9,12 +9,16 @@ import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'api/cursor_api.dart';
 import 'models/models.dart';
+import 'settings/settings_page.dart';
 import 'store.dart';
 import 'theme.dart';
+import 'voice/create_engine.dart';
+import 'voice/stt_engine.dart';
 import 'widgets/answer_body.dart';
 import 'widgets/frosted.dart';
+
+export 'settings/settings_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -751,6 +755,10 @@ class _ComposerState extends State<Composer> {
   final _picker = ImagePicker();
   final List<PromptImage> _images = [];
   bool _picking = false;
+  bool _listening = false;
+  bool _transcribing = false;
+  String _voiceAnchor = '';
+  SttEngine? _stt;
 
   @override
   void initState() {
@@ -771,8 +779,72 @@ class _ComposerState extends State<Composer> {
 
   @override
   void dispose() {
+    unawaited(_stt?.cancel());
     _controller.dispose();
     super.dispose();
+  }
+
+  Future<void> _startVoice() async {
+    if (_listening || _transcribing || widget.store.sending) return;
+    if (!widget.store.voiceMicReady) return;
+    _voiceAnchor = _controller.text;
+    final engine = createSttEngine(widget.store);
+    _stt = engine;
+    setState(() => _listening = true);
+    try {
+      await engine.start(
+        onPartial: (partial) {
+          if (!mounted || !_listening) return;
+          _controller.text = joinTranscript(_voiceAnchor, partial);
+          _controller.selection = TextSelection.collapsed(
+            offset: _controller.text.length,
+          );
+        },
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _listening = false);
+      _stt = null;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
+  Future<void> _confirmVoice() async {
+    final engine = _stt;
+    if (engine == null || _transcribing) return;
+    setState(() {
+      _listening = false;
+      _transcribing = true;
+    });
+    try {
+      final text = await engine.finish();
+      if (!mounted) return;
+      _controller.text = joinTranscript(_voiceAnchor, text);
+      _controller.selection = TextSelection.collapsed(
+        offset: _controller.text.length,
+      );
+    } catch (e) {
+      if (!mounted) return;
+      _controller.text = _voiceAnchor;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    } finally {
+      _stt = null;
+      if (mounted) setState(() => _transcribing = false);
+    }
+  }
+
+  Future<void> _cancelVoice() async {
+    final engine = _stt;
+    _stt = null;
+    try {
+      await engine?.cancel();
+    } catch (_) {}
+    if (!mounted) return;
+    _controller.text = _voiceAnchor;
+    setState(() {
+      _listening = false;
+      _transcribing = false;
+    });
   }
 
   Future<void> _addFromPicker(ImageSource source) async {
@@ -983,6 +1055,36 @@ class _ComposerState extends State<Composer> {
                       ),
                     ),
                     const SizedBox(width: 4),
+                    if (widget.store.voiceMicReady &&
+                        (_listening || _transcribing)) ...[
+                      IconButton(
+                        key: const Key('composer-voice-cancel'),
+                        tooltip: '取消',
+                        onPressed: busy || _transcribing ? null : _cancelVoice,
+                        icon: const Icon(Icons.close),
+                      ),
+                      IconButton.filledTonal(
+                        key: const Key('composer-voice-confirm'),
+                        tooltip: '完成',
+                        onPressed: busy || _transcribing ? null : _confirmVoice,
+                        icon: _transcribing
+                            ? SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: scheme.primary,
+                                ),
+                              )
+                            : const Icon(Icons.check),
+                      ),
+                    ] else if (widget.store.voiceMicReady)
+                      IconButton(
+                        key: const Key('composer-mic'),
+                        tooltip: '语音输入',
+                        onPressed: busy ? null : _startVoice,
+                        icon: const Icon(Icons.mic_none_outlined),
+                      ),
                     IconButton.filled(
                       key: const Key('composer-send'),
                       tooltip: '发送',
@@ -1007,242 +1109,4 @@ class _ComposerState extends State<Composer> {
       ),
     );
   }
-}
-
-class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key, required this.store});
-
-  final ChatStore store;
-
-  @override
-  State<SettingsPage> createState() => _SettingsPageState();
-}
-
-class _SettingsPageState extends State<SettingsPage> {
-  late final TextEditingController _key;
-
-  @override
-  void initState() {
-    super.initState();
-    _key = TextEditingController(text: widget.store.apiKey);
-  }
-
-  @override
-  void dispose() {
-    _key.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      extendBodyBehindAppBar: true,
-      appBar: AppBar(
-        flexibleSpace: const FrostedBar(),
-        title: const Text('设置'),
-      ),
-      body: ListView(
-        padding: EdgeInsets.fromLTRB(
-          16,
-          MediaQuery.paddingOf(context).top + kToolbarHeight + 16,
-          16,
-          32,
-        ),
-        children: [
-          const Text('Cursor API Key'),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _key,
-            obscureText: true,
-            decoration: const InputDecoration(
-              hintText: 'cursor_…',
-              border: OutlineInputBorder(),
-            ),
-            onChanged: (v) => widget.store.apiKey = v,
-          ),
-          const SizedBox(height: 16),
-          Text('怎么拿到 Key', style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 8),
-          Text(
-            '1. 用能登录 Cursor 的账号，在浏览器打开这个页面：',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 4),
-          SelectableText(
-            kCursorApiKeyUrl,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-            ),
-          ),
-          Align(
-            alignment: Alignment.centerLeft,
-            child: TextButton.icon(
-              key: const Key('copy-api-key-url'),
-              onPressed: () async {
-                await Clipboard.setData(
-                  const ClipboardData(text: kCursorApiKeyUrl),
-                );
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('网址已复制，去浏览器打开'),
-                    duration: Duration(seconds: 2),
-                  ),
-                );
-              },
-              icon: const Icon(Icons.copy_outlined, size: 18),
-              label: const Text('复制网址'),
-            ),
-          ),
-          Text(
-            '2. 点 Create API Key，复制以 cursor_ 开头的那一串。',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '3. 粘贴到上面。Key 只存在这台设备上。没有 Cursor 账号，或账号还不能用 Cloud Agents，网页上会创建失败。',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 20),
-          const Text('模型'),
-          const SizedBox(height: 8),
-          ListenableBuilder(
-            listenable: widget.store,
-            builder: (context, _) {
-              final models = widget.store.models;
-              if (models.isEmpty) {
-                if (widget.store.loadingModels) {
-                  return const LinearProgressIndicator();
-                }
-                return Text(
-                  widget.store.modelsError ?? '点下面保存并刷新，会去拉可用模型；失败会自动再试。',
-                  style: Theme.of(context).textTheme.bodySmall,
-                );
-              }
-              return Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (widget.store.loadingModels)
-                    const Padding(
-                      padding: EdgeInsets.only(bottom: 12),
-                      child: LinearProgressIndicator(),
-                    ),
-                  if (widget.store.modelsError != null) ...[
-                    Text(
-                      widget.store.modelsError!,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                  ],
-                  DropdownMenu<String>(
-                    key: ValueKey('model-${widget.store.modelId}'),
-                    expandedInsets: EdgeInsets.zero,
-                    initialSelection:
-                        models.any((m) => m.id == widget.store.modelId)
-                        ? widget.store.modelId
-                        : models.first.id,
-                    dropdownMenuEntries: [
-                      for (final m in models)
-                        DropdownMenuEntry(
-                          value: m.id,
-                          label: m.displayName,
-                          trailingIcon: m.parameters.isEmpty
-                              ? null
-                              : Text(
-                                  m.parameters.map((p) => p.label).join(' · '),
-                                  style: Theme.of(context).textTheme.labelSmall,
-                                ),
-                        ),
-                    ],
-                    onSelected: (v) {
-                      if (v == null) return;
-                      widget.store.selectModel(v, persist: false);
-                    },
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    '换模型后，下面只出现这个模型目录里有的参数。思考档不一致的不会硬套。',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                  const SizedBox(height: 8),
-                  ..._paramPickers(context, widget.store),
-                ],
-              );
-            },
-          ),
-          Text(
-            '已开始的对话沿用当时的模型；改档位后请开新对话。',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '已经有模型列表就不必反复去拉。换了 Key，或想更新目录，再点保存并刷新。',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 24),
-          ListenableBuilder(
-            listenable: widget.store,
-            builder: (context, _) {
-              final busy = widget.store.loadingModels;
-              return FilledButton(
-                onPressed: busy
-                    ? null
-                    : () async {
-                        widget.store.apiKey = _key.text;
-                        await widget.store.saveSettings();
-                        await widget.store.refreshModels(force: true);
-                        if (!context.mounted) return;
-                        if (widget.store.models.isNotEmpty) {
-                          if (widget.store.modelsError != null) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(widget.store.modelsError!),
-                              ),
-                            );
-                          }
-                          Navigator.pop(context);
-                        }
-                      },
-                child: Text(busy ? '正在刷新…' : '保存并刷新模型'),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-List<Widget> _paramPickers(BuildContext context, ChatStore store) {
-  final model = store.selectedModel;
-  if (model == null) return const [];
-  if (model.parameters.isEmpty) {
-    return [
-      Text(
-        '${model.displayName} 没有 Fast / 思考强度参数。',
-        style: Theme.of(context).textTheme.bodySmall,
-      ),
-    ];
-  }
-  return [
-    for (final p in model.parameters) ...[
-      const SizedBox(height: 12),
-      Text(p.label, style: Theme.of(context).textTheme.titleSmall),
-      const SizedBox(height: 8),
-      Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: [
-          for (final v in p.values)
-            ChoiceChip(
-              label: Text(v.label),
-              selected: store.modelParams[p.id] == v.value,
-              onSelected: (_) => store.setParam(p.id, v.value),
-            ),
-        ],
-      ),
-    ],
-  ];
 }
