@@ -17,6 +17,29 @@ double pcm16Rms(Uint8List bytes) {
   return math.sqrt(sum / n).clamp(0.0, 1.0);
 }
 
+/// Peak-weighted meter so spoken syllables move the bars more than RMS alone.
+double pcm16Vu(Uint8List bytes) {
+  final n = bytes.length ~/ 2;
+  if (n <= 0) return 0;
+  final bd = ByteData.sublistView(bytes);
+  var sum = 0.0;
+  var peak = 0.0;
+  for (var i = 0; i < n; i++) {
+    final v = bd.getInt16(i * 2, Endian.little) / 32768.0;
+    final a = v.abs();
+    if (a > peak) peak = a;
+    sum += v * v;
+  }
+  final rms = math.sqrt(sum / n);
+  return (rms * 0.35 + peak * 0.8).clamp(0.0, 1.0);
+}
+
+/// Lift typical speech (0.02–0.2) into a visible 0–1 bar height.
+double boostVoiceMeter(double level) {
+  final x = level.clamp(0.0, 1.0);
+  return (math.sqrt(x) * 1.65).clamp(0.0, 1.0);
+}
+
 /// True when the buffer is too short or too quiet to be real speech.
 bool pcmLooksSilent(Uint8List pcm, {double threshold = 0.004}) {
   // 16 kHz mono s16le: 3200 bytes is 0.1s.
@@ -61,7 +84,7 @@ class PcmRecorder {
           final bytes = Uint8List.fromList(data);
           _buf.add(bytes);
           onChunk?.call(bytes);
-          onLevel?.call(pcm16Rms(bytes));
+          onLevel?.call(pcm16Vu(bytes));
         },
         onError: (_) {},
       );

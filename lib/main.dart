@@ -14,6 +14,7 @@ import 'settings/settings_page.dart';
 import 'store.dart';
 import 'theme.dart';
 import 'voice/create_engine.dart';
+import 'voice/pcm_recorder.dart';
 import 'voice/stt_engine.dart';
 import 'widgets/answer_body.dart';
 import 'widgets/frosted.dart';
@@ -753,6 +754,7 @@ class Composer extends StatefulWidget {
 
 class _ComposerState extends State<Composer> {
   final _controller = TextEditingController();
+  final _focus = FocusNode();
   final _picker = ImagePicker();
   final List<PromptImage> _images = [];
   bool _picking = false;
@@ -764,7 +766,7 @@ class _ComposerState extends State<Composer> {
   Timer? _voiceClock;
   Duration _voiceElapsed = Duration.zero;
   double _voicePhase = 0;
-  final List<double> _voiceLevels = List<double>.filled(42, 0);
+  final List<double> _voiceLevels = List<double>.filled(20, 0);
 
   @override
   void initState() {
@@ -789,6 +791,7 @@ class _ComposerState extends State<Composer> {
     _voiceClock?.cancel();
     unawaited(_stt?.cancel());
     _controller.dispose();
+    _focus.dispose();
     super.dispose();
   }
 
@@ -815,9 +818,9 @@ class _ComposerState extends State<Composer> {
     _voiceTick = Timer.periodic(const Duration(milliseconds: 80), (_) {
       if (!mounted || !_listening) return;
       setState(() {
-        _voicePhase += 0.2;
+        _voicePhase += 0.28;
         for (var i = 0; i < _voiceLevels.length; i++) {
-          _voiceLevels[i] *= 0.8;
+          _voiceLevels[i] *= 0.86;
         }
       });
     });
@@ -831,13 +834,20 @@ class _ComposerState extends State<Composer> {
     if (!mounted || !_listening) return;
     setState(() {
       _voiceLevels.removeAt(0);
-      _voiceLevels.add(level.clamp(0.0, 1.0));
+      _voiceLevels.add(boostVoiceMeter(level));
     });
+  }
+
+  void _hideKeyboard() {
+    _focus.unfocus();
+    FocusManager.instance.primaryFocus?.unfocus();
+    unawaited(SystemChannels.textInput.invokeMethod('TextInput.hide'));
   }
 
   Future<void> _startVoice() async {
     if (_listening || _transcribing || widget.store.sending) return;
     if (!widget.store.voiceMicReady) return;
+    _hideKeyboard();
     _voiceAnchor = _controller.text;
     final engine = createSttEngine(widget.store);
     _stt = engine;
@@ -1071,27 +1081,29 @@ class _ComposerState extends State<Composer> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    IconButton(
-                      tooltip: '相册',
-                      onPressed: busy
-                          ? null
-                          : () {
-                              if (Platform.isLinux) {
-                                _addFromFiles();
-                              } else {
-                                _addFromPicker(ImageSource.gallery);
-                              }
-                            },
-                      icon: const Icon(Icons.add),
-                    ),
-                    if (!Platform.isLinux)
+                    if (!_listening && !_transcribing) ...[
                       IconButton(
-                        tooltip: '拍照',
+                        tooltip: '相册',
                         onPressed: busy
                             ? null
-                            : () => _addFromPicker(ImageSource.camera),
-                        icon: const Icon(Icons.photo_camera_outlined),
+                            : () {
+                                if (Platform.isLinux) {
+                                  _addFromFiles();
+                                } else {
+                                  _addFromPicker(ImageSource.gallery);
+                                }
+                              },
+                        icon: const Icon(Icons.add),
                       ),
+                      if (!Platform.isLinux)
+                        IconButton(
+                          tooltip: '拍照',
+                          onPressed: busy
+                              ? null
+                              : () => _addFromPicker(ImageSource.camera),
+                          icon: const Icon(Icons.photo_camera_outlined),
+                        ),
+                    ],
                     Expanded(
                       child: Stack(
                         alignment: Alignment.centerLeft,
@@ -1103,10 +1115,11 @@ class _ComposerState extends State<Composer> {
                               child: TextField(
                                 key: const Key('composer-input'),
                                 controller: _controller,
+                                focusNode: _focus,
                                 minLines: 1,
-                                maxLines: 6,
+                                maxLines: _listening || _transcribing ? 1 : 6,
                                 textInputAction: TextInputAction.newline,
-                                enabled: !busy,
+                                enabled: !busy && !_listening && !_transcribing,
                                 decoration: const InputDecoration(
                                   hintText: '问点什么…',
                                   border: InputBorder.none,

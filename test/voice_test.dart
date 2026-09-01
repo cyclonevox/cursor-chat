@@ -438,6 +438,34 @@ void main() {
     expect(find.byKey(const Key('composer-mic')), findsOneWidget);
   });
 
+  testWidgets('voice timer sits to the right of the waveform', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 200,
+              child: VoiceListeningBar(
+                levels: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                elapsed: Duration(seconds: 7),
+                phase: 2,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final wave = tester.getRect(
+      find.descendant(
+        of: find.byType(VoiceListeningBar),
+        matching: find.byType(CustomPaint),
+      ),
+    );
+    final timer = tester.getRect(find.byKey(const Key('composer-voice-elapsed')));
+    expect(timer.left, greaterThan(wave.right));
+    expect(find.text('0:07'), findsOneWidget);
+  });
+
   testWidgets('listening replaces the input with a waveform and timer', (
     tester,
   ) async {
@@ -445,14 +473,29 @@ void main() {
     debugSttFactory = FakeSttEngine.new;
     final store = _readyCloudStore();
     await tester.pumpWidget(ChatApp(store: store));
+    await tester.enterText(find.byKey(const Key('composer-input')), 'x');
+    await tester.pump();
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('composer-input')))
+          .focusNode
+          ?.hasFocus,
+      isTrue,
+    );
     await tester.tap(find.byKey(const Key('composer-mic')));
     await tester.pump();
     expect(find.byKey(const Key('composer-voice-meter')), findsOneWidget);
     expect(find.byKey(const Key('composer-voice-elapsed')), findsOneWidget);
     expect(find.text('0:00'), findsOneWidget);
     expect(find.byKey(const Key('composer-send')), findsNothing);
+    expect(find.byTooltip('相册'), findsNothing);
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('0:01'), findsOneWidget);
+    final input = tester.widget<TextField>(
+      find.byKey(const Key('composer-input')),
+    );
+    expect(input.focusNode?.hasFocus, isFalse);
+    expect(input.enabled, isFalse);
     await tester.tap(find.byKey(const Key('composer-voice-cancel')));
     await tester.pump();
     expect(find.byKey(const Key('composer-voice-meter')), findsNothing);
@@ -472,6 +515,8 @@ void main() {
     loud[2] = 0x00;
     loud[3] = 0x40;
     expect(pcm16Rms(loud), greaterThan(0.4));
+    expect(pcm16Vu(loud), greaterThan(pcm16Rms(loud)));
+    expect(boostVoiceMeter(0.04), greaterThan(0.2));
     expect(pcmLooksSilent(Uint8List(0)), isTrue);
     expect(pcmLooksSilent(Uint8List(6400)), isTrue);
     final speech = Uint8List(6400);
