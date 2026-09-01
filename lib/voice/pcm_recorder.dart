@@ -34,10 +34,36 @@ double pcm16Vu(Uint8List bytes) {
   return (rms * 0.35 + peak * 0.8).clamp(0.0, 1.0);
 }
 
-/// Lift typical speech (0.02–0.2) into a visible 0–1 bar height.
+/// Map mic energy to bar height without flattening loud speech to a flat max.
 double boostVoiceMeter(double level) {
   final x = level.clamp(0.0, 1.0);
-  return (math.sqrt(x) * 1.65).clamp(0.0, 1.0);
+  if (x < 0.006) return 0;
+  return (x * 3.6).clamp(0.0, 1.0);
+}
+
+/// Split PCM into ~20ms peak windows so the tape has syllable-shaped bars.
+List<double> pcm16VuWindows(Uint8List bytes, {int samplesPerWindow = 320}) {
+  final n = bytes.length ~/ 2;
+  if (n <= 0) return const [];
+  final bd = ByteData.sublistView(bytes);
+  final out = <double>[];
+  var i = 0;
+  while (i < n) {
+    final end = math.min(i + samplesPerWindow, n);
+    var sum = 0.0;
+    var peak = 0.0;
+    for (var s = i; s < end; s++) {
+      final v = bd.getInt16(s * 2, Endian.little) / 32768.0;
+      final a = v.abs();
+      if (a > peak) peak = a;
+      sum += v * v;
+    }
+    final count = end - i;
+    final rms = math.sqrt(sum / count);
+    out.add((rms * 0.35 + peak * 0.8).clamp(0.0, 1.0));
+    i = end;
+  }
+  return out;
 }
 
 /// True when the buffer is too short or too quiet to be real speech.
@@ -84,7 +110,12 @@ class PcmRecorder {
           final bytes = Uint8List.fromList(data);
           _buf.add(bytes);
           onChunk?.call(bytes);
-          onLevel?.call(pcm16Vu(bytes));
+          final cb = onLevel;
+          if (cb != null) {
+            for (final v in pcm16VuWindows(bytes)) {
+              cb(v);
+            }
+          }
         },
         onError: (_) {},
       );

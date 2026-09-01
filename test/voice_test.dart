@@ -446,9 +446,11 @@ void main() {
             child: SizedBox(
               width: 200,
               child: VoiceListeningBar(
-                levels: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                levels: [
+                  0.05, 0.08, 0.1, 0.12, 0.2, 0.35, 0.7, 1, 0.85, 0.4,
+                  0.18, 0.1, 0.08, 0.06, 0.05, 0.04, 0.04, 0.05, 0.06, 0.05,
+                ],
                 elapsed: Duration(seconds: 7),
-                phase: 2,
               ),
             ),
           ),
@@ -488,7 +490,7 @@ void main() {
     expect(find.byKey(const Key('composer-voice-elapsed')), findsOneWidget);
     expect(find.text('0:00'), findsOneWidget);
     expect(find.byKey(const Key('composer-send')), findsNothing);
-    expect(find.byTooltip('相册'), findsNothing);
+    expect(find.byTooltip('相册'), findsOneWidget);
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('0:01'), findsOneWidget);
     final input = tester.widget<TextField>(
@@ -516,7 +518,8 @@ void main() {
     loud[3] = 0x40;
     expect(pcm16Rms(loud), greaterThan(0.4));
     expect(pcm16Vu(loud), greaterThan(pcm16Rms(loud)));
-    expect(boostVoiceMeter(0.04), greaterThan(0.2));
+    expect(boostVoiceMeter(0.04), greaterThan(0.1));
+    expect(boostVoiceMeter(0.04), lessThan(0.3));
     expect(pcmLooksSilent(Uint8List(0)), isTrue);
     expect(pcmLooksSilent(Uint8List(6400)), isTrue);
     final speech = Uint8List(6400);
@@ -525,6 +528,9 @@ void main() {
       speech[i + 1] = 0x20;
     }
     expect(pcmLooksSilent(speech), isFalse);
+    final windows = pcm16VuWindows(speech, samplesPerWindow: 320);
+    expect(windows.length, greaterThan(1));
+    expect(windows.every((v) => v > 0), isTrue);
   });
 
   testWidgets('cross restores the text from before listening', (tester) async {
@@ -569,7 +575,7 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('voice-mode-off')), findsOneWidget);
     expect(find.byKey(const Key('voice-mode-system')), findsNothing);
-    expect(find.textContaining('系统听写只在 Android 上可用'), findsOneWidget);
+    expect(find.textContaining('本机模型和云端听写都可以用'), findsOneWidget);
     await tester.tap(find.byKey(const Key('voice-mode-cloud')));
     await tester.pump();
     await tester.enterText(

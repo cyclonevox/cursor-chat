@@ -762,11 +762,10 @@ class _ComposerState extends State<Composer> {
   bool _transcribing = false;
   String _voiceAnchor = '';
   SttEngine? _stt;
-  Timer? _voiceTick;
   Timer? _voiceClock;
   Duration _voiceElapsed = Duration.zero;
-  double _voicePhase = 0;
-  final List<double> _voiceLevels = List<double>.filled(20, 0);
+  final List<double> _voiceLevels = List<double>.filled(56, 0);
+  bool _voiceLevelDirty = false;
 
   @override
   void initState() {
@@ -787,7 +786,6 @@ class _ComposerState extends State<Composer> {
 
   @override
   void dispose() {
-    _voiceTick?.cancel();
     _voiceClock?.cancel();
     unawaited(_stt?.cancel());
     _controller.dispose();
@@ -796,12 +794,9 @@ class _ComposerState extends State<Composer> {
   }
 
   void _resetVoiceVisual() {
-    _voiceTick?.cancel();
     _voiceClock?.cancel();
-    _voiceTick = null;
     _voiceClock = null;
     _voiceElapsed = Duration.zero;
-    _voicePhase = 0;
     for (var i = 0; i < _voiceLevels.length; i++) {
       _voiceLevels[i] = 0;
     }
@@ -809,21 +804,10 @@ class _ComposerState extends State<Composer> {
 
   void _beginVoiceVisual() {
     _voiceElapsed = Duration.zero;
-    _voicePhase = 0;
     for (var i = 0; i < _voiceLevels.length; i++) {
       _voiceLevels[i] = 0;
     }
-    _voiceTick?.cancel();
     _voiceClock?.cancel();
-    _voiceTick = Timer.periodic(const Duration(milliseconds: 80), (_) {
-      if (!mounted || !_listening) return;
-      setState(() {
-        _voicePhase += 0.28;
-        for (var i = 0; i < _voiceLevels.length; i++) {
-          _voiceLevels[i] *= 0.86;
-        }
-      });
-    });
     _voiceClock = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || !_listening) return;
       setState(() => _voiceElapsed += const Duration(seconds: 1));
@@ -832,9 +816,13 @@ class _ComposerState extends State<Composer> {
 
   void _onVoiceLevel(double level) {
     if (!mounted || !_listening) return;
-    setState(() {
-      _voiceLevels.removeAt(0);
-      _voiceLevels.add(boostVoiceMeter(level));
+    _voiceLevels.removeAt(0);
+    _voiceLevels.add(boostVoiceMeter(level));
+    if (_voiceLevelDirty) return;
+    _voiceLevelDirty = true;
+    scheduleMicrotask(() {
+      _voiceLevelDirty = false;
+      if (mounted && _listening) setState(() {});
     });
   }
 
@@ -882,9 +870,7 @@ class _ComposerState extends State<Composer> {
     setState(() {
       _listening = false;
       _transcribing = true;
-      _voiceTick?.cancel();
       _voiceClock?.cancel();
-      _voiceTick = null;
       _voiceClock = null;
     });
     try {
@@ -1081,29 +1067,27 @@ class _ComposerState extends State<Composer> {
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    if (!_listening && !_transcribing) ...[
+                    IconButton(
+                      tooltip: '相册',
+                      onPressed: busy || _listening || _transcribing
+                          ? null
+                          : () {
+                              if (Platform.isLinux) {
+                                _addFromFiles();
+                              } else {
+                                _addFromPicker(ImageSource.gallery);
+                              }
+                            },
+                      icon: const Icon(Icons.add),
+                    ),
+                    if (!Platform.isLinux && !_listening && !_transcribing)
                       IconButton(
-                        tooltip: '相册',
+                        tooltip: '拍照',
                         onPressed: busy
                             ? null
-                            : () {
-                                if (Platform.isLinux) {
-                                  _addFromFiles();
-                                } else {
-                                  _addFromPicker(ImageSource.gallery);
-                                }
-                              },
-                        icon: const Icon(Icons.add),
+                            : () => _addFromPicker(ImageSource.camera),
+                        icon: const Icon(Icons.photo_camera_outlined),
                       ),
-                      if (!Platform.isLinux)
-                        IconButton(
-                          tooltip: '拍照',
-                          onPressed: busy
-                              ? null
-                              : () => _addFromPicker(ImageSource.camera),
-                          icon: const Icon(Icons.photo_camera_outlined),
-                        ),
-                    ],
                     Expanded(
                       child: Stack(
                         alignment: Alignment.centerLeft,
@@ -1143,7 +1127,6 @@ class _ComposerState extends State<Composer> {
                               key: const Key('composer-voice-meter'),
                               levels: List<double>.from(_voiceLevels),
                               elapsed: _voiceElapsed,
-                              phase: _voicePhase,
                               transcribing: _transcribing,
                             ),
                         ],

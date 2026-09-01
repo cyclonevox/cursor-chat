@@ -198,7 +198,7 @@ class _SettingsPageState extends State<SettingsPage> {
               if (!Platform.isAndroid) ...[
                 const SizedBox(height: 8),
                 Text(
-                  '系统听写只在 Android 上可用。',
+                  '系统听写是手机系统自带的识别，Linux 上没有这一项。本机模型和云端听写都可以用，模型和 Android 是同一套。',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ],

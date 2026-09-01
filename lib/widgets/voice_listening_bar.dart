@@ -12,13 +12,11 @@ class VoiceListeningBar extends StatelessWidget {
     super.key,
     required this.levels,
     required this.elapsed,
-    this.phase = 0,
     this.transcribing = false,
   });
 
   final List<double> levels;
   final Duration elapsed;
-  final double phase;
   final bool transcribing;
 
   @override
@@ -30,13 +28,12 @@ class VoiceListeningBar extends StatelessWidget {
         children: [
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
+              padding: const EdgeInsets.only(left: 4, right: 8),
               child: ClipRect(
                 child: CustomPaint(
                   painter: _WavePainter(
                     levels: levels,
                     color: scheme.onSurface,
-                    phase: phase,
                     muted: transcribing,
                   ),
                   child: const SizedBox.expand(),
@@ -44,9 +41,8 @@ class VoiceListeningBar extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: 14),
           SizedBox(
-            width: 42,
+            width: 44,
             child: Text(
               formatVoiceElapsed(elapsed),
               key: const Key('composer-voice-elapsed'),
@@ -68,13 +64,11 @@ class _WavePainter extends CustomPainter {
   _WavePainter({
     required this.levels,
     required this.color,
-    required this.phase,
     required this.muted,
   });
 
   final List<double> levels;
   final Color color;
-  final double phase;
   final bool muted;
 
   @override
@@ -83,22 +77,30 @@ class _WavePainter extends CustomPainter {
     canvas.save();
     canvas.clipRect(Offset.zero & size);
     final n = math.max(levels.length, 1);
-    final gap = 3.0;
-    final barW = math.max(2.5, (size.width - gap * (n - 1)) / n);
-    final stroke = barW.clamp(2.5, 4.0);
-    final usable = size.width - stroke;
+    const stroke = 1.6;
+    const fade = 0.14;
+    final usable = math.max(size.width - stroke, 0.0);
     final step = n == 1 ? 0.0 : usable / (n - 1);
     final mid = size.height / 2;
     final paint = Paint()
-      ..color = color.withValues(alpha: muted ? 0.35 : 0.9)
       ..strokeCap = StrokeCap.round
       ..strokeWidth = stroke;
     for (var i = 0; i < n; i++) {
-      final sample = i < levels.length ? levels[i] : 0.0;
-      final idle = 0.22 + 0.16 * math.sin(phase + i * 0.42);
-      final v = math.max(sample, idle);
-      final h = (6.0 + v * (size.height - 10)).clamp(6.0, size.height - 2);
+      final t = n == 1 ? 0.5 : i / (n - 1);
+      var edge = 1.0;
+      if (t < fade) {
+        edge = t / fade;
+      } else if (t > 1 - fade) {
+        edge = (1 - t) / fade;
+      }
+      edge = Curves.easeInOut.transform(edge.clamp(0.0, 1.0));
+      final sample = i < levels.length ? levels[i].clamp(0.0, 1.0) : 0.0;
+      final v = sample;
+      final h = (3.5 + v * (size.height - 8)).clamp(3.5, size.height - 2);
       final x = stroke / 2 + i * step;
+      paint.color = color.withValues(
+        alpha: (muted ? 0.28 : 0.92) * edge,
+      );
       canvas.drawLine(Offset(x, mid - h / 2), Offset(x, mid + h / 2), paint);
     }
     canvas.restore();
@@ -106,8 +108,5 @@ class _WavePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _WavePainter old) =>
-      old.phase != phase ||
-      old.muted != muted ||
-      old.color != color ||
-      old.levels != levels;
+      old.muted != muted || old.color != color || old.levels != levels;
 }
