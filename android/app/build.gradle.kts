@@ -56,12 +56,6 @@ android {
                 } else {
                     signingConfigs.getByName("debug")
                 }
-            // Release is phones only. x86/x86_64 stay in debug for emulators.
-            ndk {
-                abiFilters.clear()
-                abiFilters.add("arm64-v8a")
-                abiFilters.add("armeabi-v7a")
-            }
         }
     }
 }
