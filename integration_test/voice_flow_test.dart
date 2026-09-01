@@ -15,7 +15,10 @@ class _FakeStt implements SttEngine {
   bool get streaming => true;
 
   @override
-  Future<void> start({void Function(String partial)? onPartial}) async {
+  Future<void> start({
+    void Function(String partial)? onPartial,
+    void Function(double level)? onLevel,
+  }) async {
     onPartial?.call('半成品');
   }
 
@@ -99,6 +102,8 @@ void main() {
     await tester.pump();
     expect(find.byKey(const Key('composer-voice-cancel')), findsOneWidget);
     expect(find.byKey(const Key('composer-voice-confirm')), findsOneWidget);
+    expect(find.byKey(const Key('composer-voice-meter')), findsOneWidget);
+    expect(find.text('0:00'), findsOneWidget);
     expect(
       tester
           .widget<TextField>(find.byKey(const Key('composer-input')))

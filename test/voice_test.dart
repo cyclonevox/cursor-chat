@@ -11,9 +11,11 @@ import 'package:cursor_chat/voice/cloud/volcengine.dart';
 import 'package:cursor_chat/voice/cloud/xunfei.dart';
 import 'package:cursor_chat/voice/device_profile.dart';
 import 'package:cursor_chat/voice/model_store.dart';
+import 'package:cursor_chat/voice/pcm_recorder.dart';
 import 'package:cursor_chat/voice/stt_engine.dart';
 import 'package:cursor_chat/voice/voice_settings.dart';
 import 'package:cursor_chat/voice/wav.dart';
+import 'package:cursor_chat/widgets/voice_listening_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,7 +40,10 @@ class FakeSttEngine implements SttEngine {
   bool get streaming => true;
 
   @override
-  Future<void> start({void Function(String partial)? onPartial}) async {
+  Future<void> start({
+    void Function(String partial)? onPartial,
+    void Function(double level)? onLevel,
+  }) async {
     lastPartial = onPartial;
     onPartial?.call(partial);
   }
@@ -190,9 +195,78 @@ void main() {
     });
     final store = ModelStore(client: client, documents: () async => tmp);
     store.minBytesOverride = (id, name) => 4;
+    store.retryDelayOverride = (_) => Duration.zero;
     await store.download('zipformer-small');
     expect(hits.any((h) => h.contains('huggingface')), isTrue);
     expect(hits.any((h) => h.contains('hf-mirror')), isTrue);
+    expect(store.isReady('zipformer-small'), isTrue);
+  });
+
+  test('model download retries a flaky URL before giving up', () async {
+    final tmp = await Directory.systemTemp.createTemp('stt-retry');
+    addTearDown(() => tmp.delete(recursive: true));
+    var failures = 0;
+    var successes = 0;
+    final client = MockClient.streaming((request, body) async {
+      if (failures < 2) {
+        failures++;
+        return http.StreamedResponse(Stream<List<int>>.value([]), 503);
+      }
+      successes++;
+      final bytes = utf8.encode('retried-file-ok');
+      return http.StreamedResponse(
+        Stream<List<int>>.value(bytes),
+        200,
+        contentLength: bytes.length,
+      );
+    });
+    final store = ModelStore(client: client, documents: () async => tmp);
+    store.minBytesOverride = (id, name) => 4;
+    store.retryDelayOverride = (_) => Duration.zero;
+    await store.download('zipformer-small');
+    expect(failures, 2);
+    expect(successes, greaterThanOrEqualTo(2));
+    expect(store.isReady('zipformer-small'), isTrue);
+  });
+
+  test('model download resumes a partial file with Range', () async {
+    final tmp = await Directory.systemTemp.createTemp('stt-range');
+    addTearDown(() => tmp.delete(recursive: true));
+    var n = 0;
+    final ranges = <String?>[];
+    final client = MockClient.streaming((request, body) async {
+      n++;
+      ranges.add(request.headers['range']);
+      if (n == 1) {
+        return http.StreamedResponse(
+          () async* {
+            yield utf8.encode('1234');
+            throw Exception('net');
+          }(),
+          200,
+          contentLength: 16,
+        );
+      }
+      if (request.headers['range'] == 'bytes=4-') {
+        final rest = utf8.encode('567890123456');
+        return http.StreamedResponse(
+          Stream<List<int>>.value(rest),
+          206,
+          contentLength: rest.length,
+        );
+      }
+      final bytes = utf8.encode('0123456789abcd');
+      return http.StreamedResponse(
+        Stream<List<int>>.value(bytes),
+        200,
+        contentLength: bytes.length,
+      );
+    });
+    final store = ModelStore(client: client, documents: () async => tmp);
+    store.minBytesOverride = (id, name) => 8;
+    store.retryDelayOverride = (_) => Duration.zero;
+    await store.download('zipformer-small');
+    expect(ranges, contains('bytes=4-'));
     expect(store.isReady('zipformer-small'), isTrue);
   });
 
@@ -362,6 +436,50 @@ void main() {
     );
     expect(store.active!.messages, isEmpty);
     expect(find.byKey(const Key('composer-mic')), findsOneWidget);
+  });
+
+  testWidgets('listening replaces the input with a waveform and timer', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    debugSttFactory = FakeSttEngine.new;
+    final store = _readyCloudStore();
+    await tester.pumpWidget(ChatApp(store: store));
+    await tester.tap(find.byKey(const Key('composer-mic')));
+    await tester.pump();
+    expect(find.byKey(const Key('composer-voice-meter')), findsOneWidget);
+    expect(find.byKey(const Key('composer-voice-elapsed')), findsOneWidget);
+    expect(find.text('0:00'), findsOneWidget);
+    expect(find.byKey(const Key('composer-send')), findsNothing);
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('0:01'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('composer-voice-cancel')));
+    await tester.pump();
+    expect(find.byKey(const Key('composer-voice-meter')), findsNothing);
+    expect(find.byKey(const Key('composer-send')), findsOneWidget);
+  });
+
+  test('pcm16 rms and elapsed labels', () {
+    expect(formatVoiceElapsed(Duration.zero), '0:00');
+    expect(formatVoiceElapsed(const Duration(seconds: 7)), '0:07');
+    expect(formatVoiceElapsed(const Duration(seconds: 75)), '1:15');
+    expect(pcm16Rms(Uint8List(0)), 0);
+    final silent = Uint8List(8);
+    expect(pcm16Rms(silent), 0);
+    final loud = Uint8List(4);
+    loud[0] = 0x00;
+    loud[1] = 0x40;
+    loud[2] = 0x00;
+    loud[3] = 0x40;
+    expect(pcm16Rms(loud), greaterThan(0.4));
+    expect(pcmLooksSilent(Uint8List(0)), isTrue);
+    expect(pcmLooksSilent(Uint8List(6400)), isTrue);
+    final speech = Uint8List(6400);
+    for (var i = 0; i < speech.length; i += 2) {
+      speech[i] = 0x00;
+      speech[i + 1] = 0x20;
+    }
+    expect(pcmLooksSilent(speech), isFalse);
   });
 
   testWidgets('cross restores the text from before listening', (tester) async {

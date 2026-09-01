@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -44,6 +45,12 @@ class ModelStore extends ChangeNotifier {
   /// Tests can shrink size checks so they do not write 80MB dummy weights.
   @visibleForTesting
   int Function(String id, String name)? minBytesOverride;
+
+  /// Tests skip the real backoff. `attempt` is 0-based within one URL.
+  @visibleForTesting
+  Duration Function(int attempt)? retryDelayOverride;
+
+  static const _attemptsPerUrl = 3;
 
   DownloadProgress? progressFor(String id) => _progress[id];
 
@@ -196,13 +203,11 @@ class ModelStore extends ChangeNotifier {
           );
           notifyListeners();
         });
-        if (tmp.existsSync()) {
-          if (dest.existsSync()) await dest.delete();
-          await tmp.rename(dest.path);
-        }
-        if (!dest.existsSync() || dest.lengthSync() < _minBytes(id, f)) {
+        if (!tmp.existsSync() || tmp.lengthSync() < _minBytes(id, f)) {
           throw HttpException('下载不完整：${f.name}');
         }
+        if (dest.existsSync()) await dest.delete();
+        await tmp.rename(dest.path);
         receivedAll += dest.lengthSync();
       }
       _readyCache.add(id);
@@ -227,42 +232,143 @@ class ModelStore extends ChangeNotifier {
     void Function(int received, int total) onProgress,
   ) async {
     Object? last;
+    await dest.parent.create(recursive: true);
     for (final raw in file.urls) {
       final url = debugRewriteDownloadUrl?.call(raw) ?? raw;
-      try {
-        await dest.parent.create(recursive: true);
-        if (dest.existsSync()) await dest.delete();
-        final req = http.Request('GET', Uri.parse(url));
-        final res = await _client.send(req);
-        if (res.statusCode < 200 || res.statusCode >= 300) {
-          last = HttpException('HTTP ${res.statusCode} $url');
-          continue;
-        }
-        final sink = dest.openWrite();
-        var got = 0;
-        final total = res.contentLength ?? _minBytes(id, file);
+      var skipUrl = false;
+      for (var attempt = 0; attempt < _attemptsPerUrl; attempt++) {
+        if (_cancel.contains(id)) throw HttpException('已暂停');
         try {
-          await for (final chunk in res.stream) {
-            if (_cancel.contains(id)) {
-              await sink.close();
-              if (dest.existsSync()) await dest.delete();
-              throw HttpException('已暂停');
-            }
-            sink.add(chunk);
-            got += chunk.length;
-            onProgress(got, total);
+          await _fetchToFile(id, file, dest, url, onProgress);
+          if (dest.existsSync() && dest.lengthSync() >= _minBytes(id, file)) {
+            return;
           }
+          last = HttpException('下载不完整：${file.name}');
+          if (dest.existsSync()) await dest.delete();
+        } on _FatalDownload catch (e) {
+          last = HttpException(e.message);
+          skipUrl = true;
+          break;
         } catch (e) {
-          await sink.close();
-          rethrow;
+          last = e;
+          if (e is HttpException && e.message == '已暂停') rethrow;
         }
-        await sink.close();
-        return;
-      } catch (e) {
-        last = e;
-        if (e is HttpException && e.message == '已暂停') rethrow;
+        if (attempt < _attemptsPerUrl - 1) {
+          await _sleepRetry(id, attempt);
+        }
       }
+      if (skipUrl) continue;
     }
     throw last ?? HttpException('无法下载 ${file.name}');
   }
+
+  Future<void> _sleepRetry(String id, int attempt) async {
+    final delay =
+        retryDelayOverride?.call(attempt) ??
+        Duration(milliseconds: 400 * (1 << attempt));
+    if (delay <= Duration.zero) return;
+    const step = Duration(milliseconds: 100);
+    var left = delay;
+    while (left > Duration.zero) {
+      if (_cancel.contains(id)) throw HttpException('已暂停');
+      final slice = left < step ? left : step;
+      await Future<void>.delayed(slice);
+      left -= slice;
+    }
+  }
+
+  Future<void> _fetchToFile(
+    String id,
+    SttModelFile file,
+    File dest,
+    String url,
+    void Function(int received, int total) onProgress,
+  ) async {
+    final existing = dest.existsSync() ? dest.lengthSync() : 0;
+    final req = http.Request('GET', Uri.parse(url));
+    req.followRedirects = true;
+    req.headers['user-agent'] = 'cursor-chat/1.0 (local-stt)';
+    if (existing > 0) {
+      req.headers['range'] = 'bytes=$existing-';
+    }
+    final res = await _client.send(req).timeout(const Duration(seconds: 45));
+    if (_cancel.contains(id)) {
+      await _drainQuietly(res);
+      throw HttpException('已暂停');
+    }
+    if (_fatalStatus(res.statusCode)) {
+      await _drainQuietly(res);
+      throw _FatalDownload('HTTP ${res.statusCode} $url');
+    }
+    if (res.statusCode == 416) {
+      await _drainQuietly(res);
+      if (dest.existsSync() && dest.lengthSync() >= _minBytes(id, file)) {
+        onProgress(dest.lengthSync(), dest.lengthSync());
+        return;
+      }
+      if (dest.existsSync()) await dest.delete();
+      throw HttpException('HTTP 416 $url');
+    }
+    if (res.statusCode != 200 && res.statusCode != 206) {
+      await _drainQuietly(res);
+      throw HttpException('HTTP ${res.statusCode} $url');
+    }
+    final append = res.statusCode == 206;
+    if (!append && dest.existsSync()) {
+      await dest.delete();
+    }
+    final sink = dest.openWrite(
+      mode: append ? FileMode.append : FileMode.write,
+    );
+    var got = append ? existing : 0;
+    final total = res.contentLength != null
+        ? (append ? existing + res.contentLength! : res.contentLength!)
+        : _minBytes(id, file);
+    try {
+      await for (final chunk in res.stream.timeout(
+        const Duration(seconds: 30),
+      )) {
+        if (_cancel.contains(id)) {
+          await sink.close();
+          throw HttpException('已暂停');
+        }
+        sink.add(chunk);
+        got += chunk.length;
+        onProgress(got, total);
+      }
+    } catch (e) {
+      try {
+        await sink.close();
+      } catch (_) {}
+      rethrow;
+    }
+    await sink.close();
+    if (res.statusCode == 200 &&
+        dest.existsSync() &&
+        dest.lengthSync() < _minBytes(id, file)) {
+      await dest.delete();
+      throw HttpException('下载不完整：${file.name}');
+    }
+  }
+
+  bool _fatalStatus(int code) =>
+      code == 400 ||
+      code == 401 ||
+      code == 403 ||
+      code == 404 ||
+      code == 410 ||
+      code == 422;
+
+  Future<void> _drainQuietly(http.StreamedResponse res) async {
+    try {
+      await res.stream.drain<void>().timeout(const Duration(seconds: 5));
+    } catch (_) {}
+  }
+}
+
+class _FatalDownload implements Exception {
+  _FatalDownload(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }

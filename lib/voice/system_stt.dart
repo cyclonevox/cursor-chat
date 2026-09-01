@@ -10,6 +10,7 @@ class SystemSttEngine implements SttEngine {
 
   final SpeechToText _speech;
   void Function(String partial)? _onPartial;
+  void Function(double level)? _onLevel;
   String _text = '';
   bool _started = false;
 
@@ -17,11 +18,15 @@ class SystemSttEngine implements SttEngine {
   bool get streaming => true;
 
   @override
-  Future<void> start({void Function(String partial)? onPartial}) async {
+  Future<void> start({
+    void Function(String partial)? onPartial,
+    void Function(double level)? onLevel,
+  }) async {
     if (!Platform.isAndroid) {
       throw UnsupportedError('系统听写只在 Android 上可用');
     }
     _onPartial = onPartial;
+    _onLevel = onLevel;
     _text = '';
     final ok = await _speech.initialize(
       onError: (e) {
@@ -39,6 +44,9 @@ class SystemSttEngine implements SttEngine {
         partialResults: true,
         cancelOnError: false,
       ),
+      onSoundLevelChange: (level) {
+        _onLevel?.call((level.abs() / 10).clamp(0.0, 1.0));
+      },
       onResult: (r) {
         _text = r.recognizedWords;
         _onPartial?.call(_text);

@@ -1,7 +1,10 @@
 abstract class SttEngine {
   bool get streaming;
 
-  Future<void> start({void Function(String partial)? onPartial});
+  Future<void> start({
+    void Function(String partial)? onPartial,
+    void Function(double level)? onLevel,
+  });
 
   Future<String> finish();
 

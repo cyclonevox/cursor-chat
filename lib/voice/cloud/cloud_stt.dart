@@ -51,14 +51,21 @@ class CloudSttEngine implements SttEngine {
   bool get streaming => false;
 
   @override
-  Future<void> start({void Function(String partial)? onPartial}) {
+  Future<void> start({
+    void Function(String partial)? onPartial,
+    void Function(double level)? onLevel,
+  }) {
+    _recorder.onLevel = onLevel;
     return _recorder.start();
   }
 
   @override
   Future<String> finish() async {
+    _recorder.onLevel = null;
     final pcm = await _recorder.stop();
-    if (pcm.isEmpty) return '';
+    if (pcmLooksSilent(pcm)) {
+      throw StateError('没有录到声音。请对着麦克风说话后再点完成。');
+    }
     final wav = pcm16ToWav(pcm);
     final fn = transcribe ?? cloudTranscribers[providerId];
     if (fn == null) {
@@ -71,7 +78,10 @@ class CloudSttEngine implements SttEngine {
   }
 
   @override
-  Future<void> cancel() => _recorder.cancel();
+  Future<void> cancel() {
+    _recorder.onLevel = null;
+    return _recorder.cancel();
+  }
 }
 
 String readJsonText(String body, List<String> paths) {

@@ -16,6 +16,39 @@ void ensureSherpaBindings() {
   _bindingsReady = true;
 }
 
+/// Keep loaded ONNX recognizers alive. Creating and `free()`ing a 200MB
+/// model every utterance OOMs the second tap and looks like "the model
+/// is not running".
+class _SherpaHold {
+  static String? onlineId;
+  static sherpa.OnlineRecognizer? online;
+  static String? offlineId;
+  static sherpa.OfflineRecognizer? offline;
+
+  static void dropOnline() {
+    try {
+      online?.free();
+    } catch (_) {}
+    online = null;
+    onlineId = null;
+  }
+
+  static void dropOffline() {
+    try {
+      offline?.free();
+    } catch (_) {}
+    offline = null;
+    offlineId = null;
+  }
+
+  static void drop({String? id}) {
+    if (id == null || id == onlineId) dropOnline();
+    if (id == null || id == offlineId) dropOffline();
+  }
+}
+
+void releaseSherpaRuntime([String? id]) => _SherpaHold.drop(id: id);
+
 class LocalSherpaStt implements SttEngine {
   LocalSherpaStt({
     required this.modelId,
@@ -36,8 +69,12 @@ class LocalSherpaStt implements SttEngine {
   bool get streaming => _model?.streaming ?? false;
 
   @override
-  Future<void> start({void Function(String partial)? onPartial}) async {
+  Future<void> start({
+    void Function(String partial)? onPartial,
+    void Function(double level)? onLevel,
+  }) async {
     _onPartial = onPartial;
+    _recorder.onLevel = onLevel;
     ensureSherpaBindings();
     final model = _model;
     if (model == null) throw StateError('未知本地模型 $modelId');
@@ -57,6 +94,7 @@ class LocalSherpaStt implements SttEngine {
   Future<String> finish() async {
     final pcm = await _recorder.stop();
     _recorder.onChunk = null;
+    _recorder.onLevel = null;
     final model = _model;
     if (model == null) return '';
     if (model.streaming) {
@@ -64,18 +102,24 @@ class LocalSherpaStt implements SttEngine {
       _stream?.inputFinished();
       _drainOnline();
       final text = _online?.getResult(_stream!).text.trim() ?? '';
-      _closeOnline();
+      _closeStream();
+      if (text.isEmpty && pcmLooksSilent(pcm)) {
+        throw StateError('没有录到声音。请对着麦克风说话后再点完成。');
+      }
       return text;
     }
-    if (pcm.isEmpty) return '';
+    if (pcmLooksSilent(pcm)) {
+      throw StateError('没有录到声音。请对着麦克风说话后再点完成。');
+    }
     return _decodeOffline(model, pcm16ToFloat32(pcm));
   }
 
   @override
   Future<void> cancel() async {
     _recorder.onChunk = null;
+    _recorder.onLevel = null;
     await _recorder.cancel();
-    _closeOnline();
+    _closeStream();
   }
 
   void _acceptPcm(Uint8List chunk) {
@@ -101,64 +145,55 @@ class LocalSherpaStt implements SttEngine {
   }
 
   Future<void> _openOnline(LocalSttModel model) async {
-    final tokens = await store.filePath(model.id, 'tokens.txt');
-    late final sherpa.OnlineModelConfig cfg;
-    if (model.kind == LocalSttKind.zipformerTransducer) {
-      cfg = sherpa.OnlineModelConfig(
-        transducer: sherpa.OnlineTransducerModelConfig(
-          encoder: await store.filePath(model.id, 'encoder.int8.onnx'),
-          decoder: await store.filePath(model.id, 'decoder.onnx'),
-          joiner: await store.filePath(model.id, 'joiner.int8.onnx'),
-        ),
-        tokens: tokens,
-        modelType: 'zipformer2',
-        numThreads: 2,
-        debug: false,
-        provider: 'cpu',
+    if (_SherpaHold.onlineId != model.id || _SherpaHold.online == null) {
+      _SherpaHold.dropOnline();
+      _SherpaHold.dropOffline();
+      final tokens = await store.filePath(model.id, 'tokens.txt');
+      late final sherpa.OnlineModelConfig cfg;
+      if (model.kind == LocalSttKind.zipformerTransducer) {
+        cfg = sherpa.OnlineModelConfig(
+          transducer: sherpa.OnlineTransducerModelConfig(
+            encoder: await store.filePath(model.id, 'encoder.int8.onnx'),
+            decoder: await store.filePath(model.id, 'decoder.onnx'),
+            joiner: await store.filePath(model.id, 'joiner.int8.onnx'),
+          ),
+          tokens: tokens,
+          modelType: 'zipformer2',
+          numThreads: 2,
+          debug: false,
+          provider: 'cpu',
+        );
+      } else {
+        cfg = sherpa.OnlineModelConfig(
+          zipformer2Ctc: sherpa.OnlineZipformer2CtcModelConfig(
+            model: await store.filePath(model.id, 'model.int8.onnx'),
+          ),
+          tokens: tokens,
+          numThreads: 2,
+          debug: false,
+          provider: 'cpu',
+        );
+      }
+      _SherpaHold.online = sherpa.OnlineRecognizer(
+        sherpa.OnlineRecognizerConfig(model: cfg),
       );
-    } else {
-      cfg = sherpa.OnlineModelConfig(
-        zipformer2Ctc: sherpa.OnlineZipformer2CtcModelConfig(
-          model: await store.filePath(model.id, 'model.int8.onnx'),
-        ),
-        tokens: tokens,
-        numThreads: 2,
-        debug: false,
-        provider: 'cpu',
-      );
+      _SherpaHold.onlineId = model.id;
     }
-    _online = sherpa.OnlineRecognizer(
-      sherpa.OnlineRecognizerConfig(model: cfg),
-    );
+    _online = _SherpaHold.online;
+    _closeStream();
     _stream = _online!.createStream();
   }
 
-  void _closeOnline() {
+  void _closeStream() {
     _stream?.free();
-    _online?.free();
     _stream = null;
-    _online = null;
   }
 
   Future<String> _decodeOffline(
     LocalSttModel model,
     Float32List samples,
   ) async {
-    final rec = sherpa.OfflineRecognizer(
-      sherpa.OfflineRecognizerConfig(
-        model: sherpa.OfflineModelConfig(
-          senseVoice: sherpa.OfflineSenseVoiceModelConfig(
-            model: await store.filePath(model.id, 'model.int8.onnx'),
-            language: 'auto',
-            useInverseTextNormalization: true,
-          ),
-          tokens: await store.filePath(model.id, 'tokens.txt'),
-          numThreads: 2,
-          debug: false,
-          provider: 'cpu',
-        ),
-      ),
-    );
+    final rec = await _openOffline(model);
     sherpa.VoiceActivityDetector? vad;
     try {
       final parts = <String>[];
@@ -188,8 +223,33 @@ class LocalSherpaStt implements SttEngine {
       return parts.where((t) => t.isNotEmpty).join(' ').trim();
     } finally {
       vad?.free();
-      rec.free();
     }
+  }
+
+  Future<sherpa.OfflineRecognizer> _openOffline(LocalSttModel model) async {
+    if (_SherpaHold.offlineId == model.id && _SherpaHold.offline != null) {
+      return _SherpaHold.offline!;
+    }
+    _SherpaHold.dropOffline();
+    _SherpaHold.dropOnline();
+    final rec = sherpa.OfflineRecognizer(
+      sherpa.OfflineRecognizerConfig(
+        model: sherpa.OfflineModelConfig(
+          senseVoice: sherpa.OfflineSenseVoiceModelConfig(
+            model: await store.filePath(model.id, 'model.int8.onnx'),
+            language: 'auto',
+            useInverseTextNormalization: true,
+          ),
+          tokens: await store.filePath(model.id, 'tokens.txt'),
+          numThreads: 2,
+          debug: false,
+          provider: 'cpu',
+        ),
+      ),
+    );
+    _SherpaHold.offline = rec;
+    _SherpaHold.offlineId = model.id;
+    return rec;
   }
 
   void _drainVad(

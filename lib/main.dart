@@ -17,6 +17,7 @@ import 'voice/create_engine.dart';
 import 'voice/stt_engine.dart';
 import 'widgets/answer_body.dart';
 import 'widgets/frosted.dart';
+import 'widgets/voice_listening_bar.dart';
 
 export 'settings/settings_page.dart';
 
@@ -759,6 +760,11 @@ class _ComposerState extends State<Composer> {
   bool _transcribing = false;
   String _voiceAnchor = '';
   SttEngine? _stt;
+  Timer? _voiceTick;
+  Timer? _voiceClock;
+  Duration _voiceElapsed = Duration.zero;
+  double _voicePhase = 0;
+  final List<double> _voiceLevels = List<double>.filled(42, 0);
 
   @override
   void initState() {
@@ -779,9 +785,54 @@ class _ComposerState extends State<Composer> {
 
   @override
   void dispose() {
+    _voiceTick?.cancel();
+    _voiceClock?.cancel();
     unawaited(_stt?.cancel());
     _controller.dispose();
     super.dispose();
+  }
+
+  void _resetVoiceVisual() {
+    _voiceTick?.cancel();
+    _voiceClock?.cancel();
+    _voiceTick = null;
+    _voiceClock = null;
+    _voiceElapsed = Duration.zero;
+    _voicePhase = 0;
+    for (var i = 0; i < _voiceLevels.length; i++) {
+      _voiceLevels[i] = 0;
+    }
+  }
+
+  void _beginVoiceVisual() {
+    _voiceElapsed = Duration.zero;
+    _voicePhase = 0;
+    for (var i = 0; i < _voiceLevels.length; i++) {
+      _voiceLevels[i] = 0;
+    }
+    _voiceTick?.cancel();
+    _voiceClock?.cancel();
+    _voiceTick = Timer.periodic(const Duration(milliseconds: 80), (_) {
+      if (!mounted || !_listening) return;
+      setState(() {
+        _voicePhase += 0.2;
+        for (var i = 0; i < _voiceLevels.length; i++) {
+          _voiceLevels[i] *= 0.8;
+        }
+      });
+    });
+    _voiceClock = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || !_listening) return;
+      setState(() => _voiceElapsed += const Duration(seconds: 1));
+    });
+  }
+
+  void _onVoiceLevel(double level) {
+    if (!mounted || !_listening) return;
+    setState(() {
+      _voiceLevels.removeAt(0);
+      _voiceLevels.add(level.clamp(0.0, 1.0));
+    });
   }
 
   Future<void> _startVoice() async {
@@ -791,6 +842,7 @@ class _ComposerState extends State<Composer> {
     final engine = createSttEngine(widget.store);
     _stt = engine;
     setState(() => _listening = true);
+    _beginVoiceVisual();
     try {
       await engine.start(
         onPartial: (partial) {
@@ -800,9 +852,14 @@ class _ComposerState extends State<Composer> {
             offset: _controller.text.length,
           );
         },
+        onLevel: _onVoiceLevel,
       );
     } catch (e) {
+      try {
+        await engine.cancel();
+      } catch (_) {}
       if (!mounted) return;
+      _resetVoiceVisual();
       setState(() => _listening = false);
       _stt = null;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
@@ -815,6 +872,10 @@ class _ComposerState extends State<Composer> {
     setState(() {
       _listening = false;
       _transcribing = true;
+      _voiceTick?.cancel();
+      _voiceClock?.cancel();
+      _voiceTick = null;
+      _voiceClock = null;
     });
     try {
       final text = await engine.finish();
@@ -829,6 +890,7 @@ class _ComposerState extends State<Composer> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     } finally {
       _stt = null;
+      _resetVoiceVisual();
       if (mounted) setState(() => _transcribing = false);
     }
   }
@@ -841,6 +903,7 @@ class _ComposerState extends State<Composer> {
     } catch (_) {}
     if (!mounted) return;
     _controller.text = _voiceAnchor;
+    _resetVoiceVisual();
     setState(() {
       _listening = false;
       _transcribing = false;
@@ -1030,28 +1093,47 @@ class _ComposerState extends State<Composer> {
                         icon: const Icon(Icons.photo_camera_outlined),
                       ),
                     Expanded(
-                      child: TextField(
-                        key: const Key('composer-input'),
-                        controller: _controller,
-                        minLines: 1,
-                        maxLines: 6,
-                        textInputAction: TextInputAction.newline,
-                        enabled: !busy,
-                        decoration: const InputDecoration(
-                          hintText: '问点什么…',
-                          border: InputBorder.none,
-                          enabledBorder: InputBorder.none,
-                          focusedBorder: InputBorder.none,
-                          filled: false,
-                          isDense: true,
-                          contentPadding: EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 10,
+                      child: Stack(
+                        alignment: Alignment.centerLeft,
+                        children: [
+                          Opacity(
+                            opacity: _listening || _transcribing ? 0 : 1,
+                            child: IgnorePointer(
+                              ignoring: _listening || _transcribing,
+                              child: TextField(
+                                key: const Key('composer-input'),
+                                controller: _controller,
+                                minLines: 1,
+                                maxLines: 6,
+                                textInputAction: TextInputAction.newline,
+                                enabled: !busy,
+                                decoration: const InputDecoration(
+                                  hintText: '问点什么…',
+                                  border: InputBorder.none,
+                                  enabledBorder: InputBorder.none,
+                                  focusedBorder: InputBorder.none,
+                                  filled: false,
+                                  isDense: true,
+                                  contentPadding: EdgeInsets.symmetric(
+                                    horizontal: 4,
+                                    vertical: 10,
+                                  ),
+                                ),
+                                onSubmitted: (_) {
+                                  if (!busy) _send();
+                                },
+                              ),
+                            ),
                           ),
-                        ),
-                        onSubmitted: (_) {
-                          if (!busy) _send();
-                        },
+                          if (_listening || _transcribing)
+                            VoiceListeningBar(
+                              key: const Key('composer-voice-meter'),
+                              levels: List<double>.from(_voiceLevels),
+                              elapsed: _voiceElapsed,
+                              phase: _voicePhase,
+                              transcribing: _transcribing,
+                            ),
+                        ],
                       ),
                     ),
                     const SizedBox(width: 4),
@@ -1085,21 +1167,22 @@ class _ComposerState extends State<Composer> {
                         onPressed: busy ? null : _startVoice,
                         icon: const Icon(Icons.mic_none_outlined),
                       ),
-                    IconButton.filled(
-                      key: const Key('composer-send'),
-                      tooltip: '发送',
-                      onPressed: busy ? null : _send,
-                      icon: busy
-                          ? SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: scheme.onPrimary,
-                              ),
-                            )
-                          : const Icon(Icons.arrow_upward),
-                    ),
+                    if (!_listening && !_transcribing)
+                      IconButton.filled(
+                        key: const Key('composer-send'),
+                        tooltip: '发送',
+                        onPressed: busy ? null : _send,
+                        icon: busy
+                            ? SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: scheme.onPrimary,
+                                ),
+                              )
+                            : const Icon(Icons.arrow_upward),
+                      ),
                   ],
                 ),
               ],

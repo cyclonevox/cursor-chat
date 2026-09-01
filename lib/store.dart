@@ -11,6 +11,7 @@ import 'api/cursor_api.dart';
 import 'models/models.dart';
 import 'title.dart';
 import 'voice/create_engine.dart';
+import 'voice/local_sherpa_stt.dart';
 import 'voice/model_store.dart';
 import 'voice/voice_settings.dart';
 
@@ -366,6 +367,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   }
 
   Future<void> deleteLocalStt(String id) async {
+    releaseSherpaRuntime(id);
     await modelStore.deleteModel(id);
     notifyListeners();
   }
