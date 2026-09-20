@@ -1152,6 +1152,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
         await _precreateInFlight;
       } catch (_) {}
     }
+    final standby = nextQuickAgentId;
     if (nextQuickAgentId != null && nextQuickAgentReady) {
       quickAgentId = nextQuickAgentId;
     } else {
@@ -1163,6 +1164,12 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     unawaited(_persist());
     if (old != null && old.isNotEmpty && old != quickAgentId) {
       _retireQuickAgent(old);
+    }
+    if (standby != null &&
+        standby.isNotEmpty &&
+        standby != quickAgentId &&
+        standby != old) {
+      _retireQuickAgent(standby);
     }
   }
 
@@ -1360,6 +1367,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
       }
       return;
     }
+    final previous = conv.agentId;
     conv.agentId = 'bc-${uuid.v4()}';
     final apiText =
         '$kFirstTurnPrefix${recencyPreamble()}${conversationContinuityPrompt(conv.messages, question)}';
@@ -1368,6 +1376,11 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     conv.pendingRunId = created.runId;
     unawaited(_persist());
     await _collectRun(api, conv, assistant, created.agentId, created.runId);
+    if (previous != null &&
+        previous.isNotEmpty &&
+        previous != created.agentId) {
+      _retireQuickAgent(previous);
+    }
   }
 
   Future<(String, String)> _ensureRun(CursorApi api, Conversation conv) async {
