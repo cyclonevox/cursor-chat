@@ -183,6 +183,18 @@ void main() {
         await req.response.close();
         return;
       }
+      if (req.method == 'GET' && path == '/v1/agents') {
+        await sendJson(200, {
+          'items': [
+            {'id': 'bc-test', 'name': '讲解这道题', 'status': 'ACTIVE'},
+          ],
+        });
+        return;
+      }
+      if (req.method == 'DELETE' && path == '/v1/agents/bc-test') {
+        await sendJson(200, {'id': 'bc-test'});
+        return;
+      }
       req.response.statusCode = 404;
       await req.response.close();
     });
@@ -243,6 +255,12 @@ void main() {
       lastCreateBody?['agentId'],
       'bc-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
     );
+  });
+
+  test('listAgents and deleteAgent', () async {
+    final items = await api.listAgents();
+    expect(items.single.id, 'bc-test');
+    await api.deleteAgent('bc-test');
   });
 
   test('createRun follow-up', () async {

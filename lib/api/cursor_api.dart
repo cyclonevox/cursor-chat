@@ -7,6 +7,26 @@ import 'sse.dart';
 
 const kCursorApiKeyUrl = 'https://cursor.com/dashboard/api';
 
+class CancelToken {
+  bool _cancelled = false;
+  HttpClient? _client;
+  void Function()? onCancel;
+
+  bool get isCancelled => _cancelled;
+
+  void attach(HttpClient client) {
+    _client = client;
+    if (_cancelled) client.close(force: true);
+  }
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    _client?.close(force: true);
+    onCancel?.call();
+  }
+}
+
 class CreatedAgent {
   const CreatedAgent({required this.agentId, required this.runId, this.name});
   final String agentId;
@@ -262,13 +282,30 @@ class CursorApi {
 
   Future<AgentInfo> getAgent(String agentId) async {
     final json = await _json('GET', '/v1/agents/$agentId');
-    return AgentInfo(
-      id: json['id'] as String,
-      name: json['name'] as String?,
-      latestRunId: json['latestRunId'] as String?,
-      status: json['status'] as String?,
-    );
+    return _agentInfo(json);
   }
+
+  Future<List<AgentInfo>> listAgents({int limit = 100}) async {
+    final json = await _json(
+      'GET',
+      '/v1/agents?limit=$limit&includeArchived=false',
+    );
+    final items = json['items'] as List? ?? json['agents'] as List? ?? const [];
+    return [
+      for (final item in items) _agentInfo(Map<String, dynamic>.from(item as Map)),
+    ];
+  }
+
+  Future<void> deleteAgent(String agentId) async {
+    await _json('DELETE', '/v1/agents/$agentId');
+  }
+
+  AgentInfo _agentInfo(Map<String, dynamic> json) => AgentInfo(
+    id: json['id'] as String,
+    name: json['name'] as String?,
+    latestRunId: json['latestRunId'] as String?,
+    status: json['status'] as String?,
+  );
 
   Future<String> createRun({
     required String agentId,
@@ -311,9 +348,15 @@ class CursorApi {
     required void Function(String delta) onDelta,
     void Function(String status)? onStatus,
     void Function(String delta)? onThinking,
+    CancelToken? cancelToken,
   }) async {
     final uri = Uri.parse('$baseUrl/v1/agents/$agentId/runs/$runId/stream');
     final client = _client();
+    cancelToken?.attach(client);
+    if (cancelToken?.isCancelled == true) {
+      client.close(force: true);
+      throw RunFailedException('CANCELLED');
+    }
     final assembled = StringBuffer();
     var poll = false;
     try {
@@ -393,13 +436,22 @@ class CursorApi {
     } on RunFailedException {
       rethrow;
     } on CursorApiException catch (e) {
+      if (cancelToken?.isCancelled == true) {
+        throw RunFailedException('CANCELLED');
+      }
       if (e.status != 0 && !e.isStreamGone) rethrow;
       poll = true;
     } catch (e) {
+      if (cancelToken?.isCancelled == true) {
+        throw RunFailedException('CANCELLED');
+      }
       if (!isTransientNetworkError(e)) rethrow;
       poll = true;
     } finally {
       client.close(force: true);
+    }
+    if (cancelToken?.isCancelled == true) {
+      throw RunFailedException('CANCELLED');
     }
     if (poll) {
       try {
@@ -468,6 +520,7 @@ class CursorApi {
       final req = await switch (method) {
         'GET' => client.getUrl(uri),
         'POST' => client.postUrl(uri),
+        'DELETE' => client.deleteUrl(uri),
         _ => throw ArgumentError(method),
       };
       _headers.forEach(req.headers.set);
