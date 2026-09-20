@@ -9,6 +9,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'api/cursor_api.dart';
 import 'models/models.dart';
+import 'quick_prompt.dart';
 import 'title.dart';
 import 'voice/create_engine.dart';
 import 'voice/local_sherpa_stt.dart';
@@ -36,6 +37,17 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   final List<Conversation> conversations = [];
   String? activeId;
   String? quickAgentId;
+  String? nextQuickAgentId;
+  bool nextQuickAgentReady = false;
+  int quickAgentRotateAfter = kDefaultRotateAfter;
+  int quickAgentRotateTokens = kDefaultRotateTokens;
+  int quickRuleRemindEvery = kDefaultRemindEvery;
+  int quickAgentLastInputTokens = 0;
+  int quickAgentTurnCount = 0;
+  final List<String> usedTopicCodes = [];
+  final Set<String> quickAgentSentTopicIds = {};
+  Future<void>? _precreateInFlight;
+  int _quickGeneration = 0;
   final Set<String> _inFlight = {};
   final Set<String> _cancelRequested = {};
   final Map<String, CancelToken> _cancelTokens = {};
@@ -79,12 +91,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     return false;
   }
 
-  Conversation? get quickChat {
-    for (final c in conversations) {
-      if (c.kind == ConversationKind.quick) return c;
-    }
-    return null;
-  }
+  Conversation? get quickChat => null;
 
   List<Conversation> get topicChats => [
     for (final c in conversations)
@@ -196,6 +203,21 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
       } catch (_) {}
     }
     modelId = prefs.getString('modelId') ?? '';
+    quickAgentRotateAfter = _readPrefInt(
+      prefs,
+      'quickAgentRotateAfter',
+      kDefaultRotateAfter,
+    );
+    quickAgentRotateTokens = _readPrefInt(
+      prefs,
+      'quickAgentRotateTokens',
+      kDefaultRotateTokens,
+    );
+    quickRuleRemindEvery = _readPrefInt(
+      prefs,
+      'quickRuleRemindEvery',
+      kDefaultRemindEvery,
+    );
     final rawParams = prefs.getString('modelParams');
     if (rawParams != null && rawParams.isNotEmpty) {
       try {
@@ -228,12 +250,31 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
           ]);
         activeId = data['activeId'] as String?;
         quickAgentId = data['quickAgentId'] as String?;
+        nextQuickAgentId = data['nextQuickAgentId'] as String?;
+        nextQuickAgentReady = data['nextQuickAgentReady'] == true;
+        quickAgentLastInputTokens =
+            (data['quickAgentLastInputTokens'] as num?)?.toInt() ?? 0;
+        quickAgentTurnCount =
+            (data['quickAgentTurnCount'] as num?)?.toInt() ?? 0;
+        usedTopicCodes
+          ..clear()
+          ..addAll([
+            for (final c in data['usedTopicCodes'] as List? ?? const [])
+              '$c',
+          ]);
+        quickAgentSentTopicIds
+          ..clear()
+          ..addAll([
+            for (final c in data['quickAgentSentTopicIds'] as List? ?? const [])
+              '$c',
+          ]);
       }
     } catch (_) {}
-    _ensureQuickChat();
+    conversations.removeWhere((c) => c.kind == ConversationKind.quick);
+    _ensureTopicCodes();
     if (activeId == null ||
         !conversations.any((c) => c.id == activeId)) {
-      activeId = quickChat?.id ?? conversations.first.id;
+      activeId = conversations.isEmpty ? null : conversations.first.id;
     }
     _sortConversations();
     unawaited(_persist());
@@ -259,6 +300,9 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
       }),
     );
     await prefs.setString('modelId', modelId);
+    await prefs.setInt('quickAgentRotateAfter', quickAgentRotateAfter);
+    await prefs.setInt('quickAgentRotateTokens', quickAgentRotateTokens);
+    await prefs.setInt('quickRuleRemindEvery', quickRuleRemindEvery);
     await prefs.setString('modelParams', jsonEncode(modelParams));
     if (models.isNotEmpty) {
       await prefs.setString(
@@ -416,30 +460,59 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     modelParams = m.alignedParams(modelParams);
   }
 
-  Conversation _ensureQuickChat() {
-    final existing = quickChat;
-    if (existing != null) return existing;
-    final c = Conversation(
-      id: uuid.v4(),
-      title: '快速对话',
-      kind: ConversationKind.quick,
-      topicId: 'quick',
-      titleFrozen: true,
-      agentId: quickAgentId,
-    );
-    conversations.insert(0, c);
-    return c;
+  int _readPrefInt(SharedPreferences prefs, String key, int fallback) {
+    final v = prefs.getInt(key);
+    if (v == null) return fallback;
+    return v < 0 ? 0 : v;
   }
 
-  /// New topic on the shared daily agent. Does not create a Cloud Agent.
+  void setQuickAgentRotateAfter(int v) {
+    quickAgentRotateAfter = v < 0 ? 0 : v;
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  void setQuickAgentRotateTokens(int v) {
+    quickAgentRotateTokens = v < 0 ? 0 : v;
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  void setQuickRuleRemindEvery(int v) {
+    quickRuleRemindEvery = v < 0 ? 0 : v;
+    notifyListeners();
+    unawaited(saveSettings());
+  }
+
+  void _ensureTopicCodes() {
+    for (final c in conversations) {
+      if (c.kind != ConversationKind.topic) continue;
+      if (isTopicCode(c.topicCode)) {
+        if (!usedTopicCodes.contains(c.topicCode)) {
+          usedTopicCodes.add(c.topicCode!);
+        }
+        continue;
+      }
+      c.topicCode = allocateTopicCode(usedTopicCodes);
+      usedTopicCodes.add(c.topicCode!);
+    }
+  }
+
+  String _nextTopicCode() {
+    final code = allocateTopicCode(usedTopicCodes);
+    usedTopicCodes.add(code);
+    return code;
+  }
+
+  /// New topic on the shared quick agent. Does not create a Cloud Agent.
   void newChat() {
-    final quick = _ensureQuickChat();
     final c = Conversation(
       id: uuid.v4(),
       title: '新对话',
       kind: ConversationKind.topic,
       topicId: uuid.v4(),
-      agentId: quickAgentId ?? quick.agentId,
+      topicCode: _nextTopicCode(),
+      agentId: quickAgentId,
     );
     conversations.add(c);
     activeId = c.id;
@@ -480,8 +553,6 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     if (activeId == id) {
       activeId = conversations.isEmpty ? null : conversations.first.id;
     }
-    _ensureQuickChat();
-    activeId ??= quickChat?.id;
     _sortConversations();
     notifyListeners();
     unawaited(_persist());
@@ -507,7 +578,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   }
 
   String? _resolvedAgentId(Conversation conv) {
-    if (conv.sharesQuickAgent) return conv.agentId ?? quickAgentId;
+    if (conv.sharesQuickAgent) return quickAgentId ?? conv.agentId;
     return conv.agentId;
   }
 
@@ -516,7 +587,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
       return false;
     }
     for (final c in conversations) {
-      if (_inFlight.contains(c.id) && _resolvedAgentId(c) == agentId) {
+      if (_inFlight.contains(c.id) && c.agentId == agentId) {
         return true;
       }
     }
@@ -525,7 +596,15 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
 
   bool _shouldQueue(Conversation conv) {
     if (_inFlight.contains(conv.id)) return true;
-    return _isAgentBusy(_resolvedAgentId(conv));
+    if (conv.sharesQuickAgent) {
+      // Creating the first agent leaves quickAgentId empty, so "busy by id"
+      // would miss it and spawn a second shared agent.
+      for (final c in conversations) {
+        if (c.sharesQuickAgent && _inFlight.contains(c.id)) return true;
+      }
+      return false;
+    }
+    return _isAgentBusy(conv.agentId);
   }
 
   void clearError() {
@@ -598,14 +677,8 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     }
     var conv = active;
     if (conv == null) {
-      _ensureQuickChat();
-      conv = active ?? quickChat;
-      if (conv == null) {
-        newChat();
-        conv = active!;
-      } else {
-        activeId = conv.id;
-      }
+      newChat();
+      conv = active!;
     }
     final trimmed = text.trim();
     if (trimmed.isEmpty && images.isEmpty) return;
@@ -803,7 +876,6 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     required int userTurns,
     bool resumeExisting = false,
   }) async {
-    final apiText = _promptForTurn(conversation, question, userTurns);
     try {
       Object? fail;
       try {
@@ -822,29 +894,51 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
             conversation.pendingRunId!,
           );
         } else {
-          final hadQuickAgent = quickAgentId != null && quickAgentId!.isNotEmpty;
-          if (conversation.agentId == null) {
-            conversation.agentId = conversation.sharesQuickAgent
-                ? (quickAgentId ?? 'bc-${uuid.v4()}')
-                : 'bc-${uuid.v4()}';
-            if (conversation.sharesQuickAgent && !hadQuickAgent) {
-              quickAgentId = conversation.agentId;
-            }
+          if (conversation.sharesQuickAgent) {
+            await _prepareQuickSend(api, conversation);
+          }
+          final creatingQuick =
+              conversation.sharesQuickAgent &&
+              (quickAgentId == null || quickAgentId!.isEmpty);
+          if (!conversation.sharesQuickAgent && conversation.agentId == null) {
+            conversation.agentId = 'bc-${uuid.v4()}';
             unawaited(_persist());
           }
           final reuseAgent = conversation.sharesQuickAgent
-              ? hadQuickAgent
+              ? !creatingQuick
               : userTurns > 1;
+          final apiText = _promptForTurn(
+            conversation,
+            question,
+            userTurns,
+            creatingQuick: creatingQuick,
+          );
           if (_cancelRequested.remove(conversation.id)) {
             throw RunFailedException('CANCELLED');
           }
           final created = reuseAgent
-              ? await _createFollowUp(api, conversation, apiText, images)
-              : await _createFirstRun(api, conversation, apiText, images);
-          conversation.agentId = created.agentId;
+              ? await _createFollowUp(
+                  api,
+                  conversation,
+                  apiText,
+                  images,
+                  agentId: conversation.sharesQuickAgent
+                      ? quickAgentId
+                      : conversation.agentId,
+                )
+              : await _createFirstRun(
+                  api,
+                  conversation,
+                  apiText,
+                  images,
+                  agentId: conversation.sharesQuickAgent
+                      ? (quickAgentId ?? 'bc-${uuid.v4()}')
+                      : conversation.agentId,
+                );
           if (conversation.sharesQuickAgent) {
-            _bindQuickAgent(created.agentId);
+            quickAgentId = created.agentId;
           }
+          conversation.agentId = created.agentId;
           conversation.pendingRunId = created.runId;
           unawaited(_persist());
           if (_cancelRequested.remove(conversation.id)) {
@@ -860,6 +954,13 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
             created.agentId,
             created.runId,
           );
+          if (conversation.sharesQuickAgent) {
+            _noteQuickTopicSent(conversation.id);
+            unawaited(
+              _refreshQuickUsage(api, created.agentId, created.runId),
+            );
+            _maybePrecreateQuickAgent();
+          }
         }
       } catch (e) {
         fail = e;
@@ -872,6 +973,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
               conversation.pendingRunId!.isEmpty);
       if (fail != null &&
           userTurns > 1 &&
+          !conversation.sharesQuickAgent &&
           (shouldReplayAsNewAgent(fail) || lostFollowUp)) {
         try {
           assistant.text = '';
@@ -920,33 +1022,206 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     _sortConversations();
     notifyListeners();
     unawaited(_persist());
-    unawaited(_drainQueued(_resolvedAgentId(conv)));
+    unawaited(
+      _drainQueued(
+        conv.sharesQuickAgent ? quickAgentId : conv.agentId,
+      ),
+    );
   }
 
-  void _bindQuickAgent(String agentId) {
-    quickAgentId = agentId;
-    for (final c in conversations) {
-      if (c.sharesQuickAgent) c.agentId = agentId;
+  bool _needsTopicReplay(Conversation conv) {
+    if (!conv.sharesQuickAgent) return false;
+    if (quickAgentId == null || quickAgentId!.isEmpty) return false;
+    if (conv.agentId == null || conv.agentId!.isEmpty) return false;
+    if (conv.agentId == quickAgentId) return false;
+    return topicHasPriorTurns(conv.messages);
+  }
+
+  bool _shouldRemind() {
+    if (quickRuleRemindEvery <= 0) return false;
+    return (quickAgentTurnCount + 1) % quickRuleRemindEvery == 0;
+  }
+
+  bool _isContinuingOnCurrent(Conversation conv) {
+    return conv.agentId != null &&
+        conv.agentId == quickAgentId &&
+        quickAgentSentTopicIds.contains(conv.id);
+  }
+
+  bool _shouldRotateBeforeTopic(Conversation conv) {
+    if (_isContinuingOnCurrent(conv)) return false;
+    // Catching up an old topic is not a new topic. Rotating first would dump
+    // its history onto yet another agent and look like a random switch.
+    if (_needsTopicReplay(conv)) return false;
+    final n = quickAgentRotateAfter;
+    final t = quickAgentRotateTokens;
+    final topicHit =
+        n > 0 &&
+        quickAgentSentTopicIds.isNotEmpty &&
+        quickAgentSentTopicIds.length >= n - 1;
+    final tokenHit = t > 0 && quickAgentLastInputTokens >= t;
+    return topicHit || tokenHit;
+  }
+
+  void _resetQuickGeneration() {
+    quickAgentSentTopicIds.clear();
+    quickAgentTurnCount = 0;
+    quickAgentLastInputTokens = 0;
+    _quickGeneration++;
+  }
+
+  void _noteQuickTopicSent(String id) {
+    quickAgentSentTopicIds.add(id);
+    quickAgentTurnCount++;
+  }
+
+  Future<void> _prepareQuickSend(CursorApi api, Conversation conv) async {
+    _maybePrecreateQuickAgent();
+    if (_shouldRotateBeforeTopic(conv)) {
+      await _rotateQuickAgent(api);
     }
+  }
+
+  void _maybePrecreateQuickAgent() {
+    if (nextQuickAgentId != null || _precreateInFlight != null) return;
+    if (quickAgentId == null || quickAgentId!.isEmpty) return;
+    final n = quickAgentRotateAfter;
+    final t = quickAgentRotateTokens;
+    final topicHit = n > 2 && quickAgentSentTopicIds.length >= n - 2;
+    final tokenHit =
+        t > 0 &&
+        quickAgentLastInputTokens > 0 &&
+        quickAgentLastInputTokens >= (t * 0.9).round();
+    if (!topicHit && !tokenHit) return;
+    _precreateInFlight = _precreateNextQuickAgent();
+  }
+
+  Future<void> _precreateNextQuickAgent() async {
+    final api = _api;
+    if (api == null) return;
+    final gen = _quickGeneration;
+    final id = 'bc-${uuid.v4()}';
+    nextQuickAgentId = id;
+    nextQuickAgentReady = false;
+    unawaited(_persist());
+    try {
+      final created = await api.createAgent(
+        text: quickAgentBootstrapPrompt(warmup: true),
+        modelId: modelId.isEmpty ? null : modelId,
+        modelParams: _paramsForApi,
+        name: '快速对话',
+        agentId: id,
+      );
+      if (gen != _quickGeneration) {
+        _retireQuickAgent(created.agentId);
+        return;
+      }
+      nextQuickAgentId = created.agentId;
+      try {
+        await api.streamRun(
+          agentId: created.agentId,
+          runId: created.runId,
+          onDelta: (_) {},
+        );
+      } catch (_) {
+        try {
+          await api.waitForRunText(created.agentId, created.runId);
+        } catch (_) {}
+      }
+      if (gen != _quickGeneration) {
+        _retireQuickAgent(created.agentId);
+        return;
+      }
+      nextQuickAgentReady = true;
+      unawaited(_persist());
+    } catch (_) {
+      if (gen == _quickGeneration) {
+        nextQuickAgentId = null;
+        nextQuickAgentReady = false;
+        unawaited(_persist());
+      }
+    } finally {
+      if (gen == _quickGeneration) _precreateInFlight = null;
+    }
+  }
+
+  Future<void> _rotateQuickAgent(CursorApi api) async {
+    final old = quickAgentId;
+    if (_precreateInFlight != null) {
+      try {
+        await _precreateInFlight;
+      } catch (_) {}
+    }
+    if (nextQuickAgentId != null && nextQuickAgentReady) {
+      quickAgentId = nextQuickAgentId;
+    } else {
+      quickAgentId = null;
+    }
+    nextQuickAgentId = null;
+    nextQuickAgentReady = false;
+    _resetQuickGeneration();
+    unawaited(_persist());
+    if (old != null && old.isNotEmpty && old != quickAgentId) {
+      _retireQuickAgent(old);
+    }
+  }
+
+  void _retireQuickAgent(String id) {
+    unawaited(() async {
+      for (var i = 0; i < 40; i++) {
+        if (!_isAgentBusy(id)) break;
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+      if (quickAgentId == id || nextQuickAgentId == id) return;
+      try {
+        await _api?.deleteAgent(id);
+      } catch (_) {}
+    }());
+  }
+
+  Future<void> _refreshQuickUsage(
+    CursorApi api,
+    String agentId,
+    String runId,
+  ) async {
+    try {
+      final usage = await api.getAgentUsage(agentId, runId: runId);
+      if (usage.promptish > 0) {
+        quickAgentLastInputTokens = usage.promptish;
+        unawaited(_persist());
+        _maybePrecreateQuickAgent();
+      }
+    } catch (_) {}
   }
 
   String _promptForTurn(
     Conversation conv,
     String question,
-    int userTurns,
-  ) {
+    int userTurns, {
+    bool creatingQuick = false,
+  }) {
     if (!conv.sharesQuickAgent) {
       return userTurns <= 1
           ? '$kFirstTurnPrefix${recencyPreamble()}$question'
           : '${recencyPreamble(followUp: true)}$question';
     }
-    return topicBoundaryPrompt(
-      topicId: conv.topicId ?? conv.id,
-      title: conv.title,
-      messages: conv.messages,
+    final replay = _needsTopicReplay(conv);
+    final remind = !creatingQuick && (replay || _shouldRemind());
+    final code = isTopicCode(conv.topicCode)
+        ? conv.topicCode!
+        : (conv.topicCode ?? conv.id);
+    final turn = quickTopicTurnPrompt(
+      topicCode: code,
       question: question,
-      firstInTopic: userTurns <= 1,
+      messages: conv.messages,
+      replay: replay,
+      remind: remind,
+      omitRecency: creatingQuick,
     );
+    if (creatingQuick) {
+      return '${quickAgentBootstrapPrompt()}$turn';
+    }
+    return turn;
   }
 
   void _refreshTitle(Conversation conv) {
@@ -972,8 +1247,10 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     CursorApi api,
     Conversation conv,
     String apiText,
-    List<PromptImage> images,
-  ) async {
+    List<PromptImage> images, {
+    String? agentId,
+  }) async {
+    final id = agentId ?? conv.agentId;
     Object? last;
     for (var i = 0; i < 3; i++) {
       try {
@@ -985,14 +1262,14 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
           name: conv.titleFrozen || !isUsableTitle(conv.title)
               ? null
               : conv.title,
-          agentId: conv.agentId,
+          agentId: id,
         );
       } catch (e) {
         last = e;
-        if (conv.agentId != null &&
+        if (id != null &&
             (isTransientNetworkError(e) ||
                 (e is CursorApiException && e.status == 409))) {
-          final recovered = await api.recoverCreated(conv.agentId!);
+          final recovered = await api.recoverCreated(id);
           if (recovered != null) return recovered;
         }
         if (!isTransientNetworkError(e)) break;
@@ -1005,18 +1282,19 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     CursorApi api,
     Conversation conv,
     String apiText,
-    List<PromptImage> images,
-  ) async {
-    final agentId = conv.agentId!;
+    List<PromptImage> images, {
+    String? agentId,
+  }) async {
+    final id = agentId ?? conv.agentId!;
     Object? last;
     for (var i = 0; i < 3; i++) {
       try {
         final runId = await api.createRun(
-          agentId: agentId,
+          agentId: id,
           text: apiText,
           images: images,
         );
-        return CreatedAgent(agentId: agentId, runId: runId);
+        return CreatedAgent(agentId: id, runId: runId);
       } catch (e) {
         last = e;
         if (!isTransientNetworkError(e)) break;
@@ -1025,17 +1303,17 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     final e = last!;
     if (isTransientNetworkError(e)) {
       try {
-        final agent = await api.getAgent(agentId);
+        final agent = await api.getAgent(id);
         final runId = agent.latestRunId;
         if (runId != null && runId.isNotEmpty) {
-          final run = await api.getRun(agentId, runId);
+          final run = await api.getRun(id, runId);
           final created = DateTime.tryParse('${run['createdAt'] ?? ''}');
           final assistantAt = conv.messages.last.createdAt;
           if (created == null ||
               !created.isBefore(
                 assistantAt.subtract(const Duration(seconds: 3)),
               )) {
-            return CreatedAgent(agentId: agentId, runId: runId);
+            return CreatedAgent(agentId: id, runId: runId);
           }
         }
       } catch (_) {}
@@ -1050,19 +1328,41 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     String question,
     List<PromptImage> images,
   ) async {
-    conv.agentId = 'bc-${uuid.v4()}';
     conv.pendingRunId = null;
-    if (conv.sharesQuickAgent) _bindQuickAgent(conv.agentId!);
-    final apiText = conv.sharesQuickAgent
-        ? topicBoundaryPrompt(
-            topicId: conv.topicId ?? conv.id,
-            title: conv.title,
-            messages: conv.messages,
-            question: question,
-            firstInTopic: true,
-            replay: true,
-          )
-        : '$kFirstTurnPrefix${recencyPreamble()}${conversationContinuityPrompt(conv.messages, question)}';
+    if (conv.sharesQuickAgent) {
+      final old = quickAgentId;
+      final newId = 'bc-${uuid.v4()}';
+      quickAgentId = newId;
+      _resetQuickGeneration();
+      nextQuickAgentId = null;
+      nextQuickAgentReady = false;
+      final code = isTopicCode(conv.topicCode)
+          ? conv.topicCode!
+          : (conv.topicCode ?? conv.id);
+      final apiText =
+          '${quickAgentBootstrapPrompt()}${quickTopicTurnPrompt(topicCode: code, question: question, messages: conv.messages, replay: topicHasPriorTurns(conv.messages), remind: true, omitRecency: true)}';
+      final created = await _createFirstRun(
+        api,
+        conv,
+        apiText,
+        images,
+        agentId: newId,
+      );
+      quickAgentId = created.agentId;
+      conv.agentId = created.agentId;
+      conv.pendingRunId = created.runId;
+      unawaited(_persist());
+      await _collectRun(api, conv, assistant, created.agentId, created.runId);
+      _noteQuickTopicSent(conv.id);
+      unawaited(_refreshQuickUsage(api, created.agentId, created.runId));
+      if (old != null && old.isNotEmpty && old != created.agentId) {
+        _retireQuickAgent(old);
+      }
+      return;
+    }
+    conv.agentId = 'bc-${uuid.v4()}';
+    final apiText =
+        '$kFirstTurnPrefix${recencyPreamble()}${conversationContinuityPrompt(conv.messages, question)}';
     final created = await _createFirstRun(api, conv, apiText, images);
     conv.agentId = created.agentId;
     conv.pendingRunId = created.runId;
@@ -1226,9 +1526,13 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     }
     if (quickAgentId == agentId) {
       quickAgentId = null;
-      for (final c in conversations) {
-        if (c.sharesQuickAgent && c.agentId == agentId) c.agentId = null;
-      }
+      nextQuickAgentId = null;
+      nextQuickAgentReady = false;
+      _resetQuickGeneration();
+    }
+    if (nextQuickAgentId == agentId) {
+      nextQuickAgentId = null;
+      nextQuickAgentReady = false;
     }
     for (final c in conversations) {
       if (c.kind == ConversationKind.isolated && c.agentId == agentId) {
@@ -1248,6 +1552,12 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
         jsonEncode({
           'activeId': activeId,
           'quickAgentId': quickAgentId,
+          'nextQuickAgentId': nextQuickAgentId,
+          'nextQuickAgentReady': nextQuickAgentReady,
+          'quickAgentLastInputTokens': quickAgentLastInputTokens,
+          'quickAgentTurnCount': quickAgentTurnCount,
+          'usedTopicCodes': usedTopicCodes,
+          'quickAgentSentTopicIds': quickAgentSentTopicIds.toList(),
           'items': [for (final c in conversations) c.toJson()],
         }),
       );
@@ -1310,49 +1620,6 @@ bool shouldReplayAsNewAgent(Object e) {
   return false;
 }
 
-String topicBoundaryPrompt({
-  required String topicId,
-  required String title,
-  required List<ChatMessage> messages,
-  required String question,
-  required bool firstInTopic,
-  bool replay = false,
-}) {
-  final buf = StringBuffer()
-    ..writeln('[话题 $topicId｜$title]')
-    ..writeln('这是快速对话里的独立话题。只根据本话题上下文回答；')
-    ..writeln('不要沿用其他话题的结论，除非用户明确要求对照。')
-    ..writeln();
-  if (firstInTopic || replay) {
-    buf.write(kFirstTurnPrefix);
-    buf.write(recencyPreamble());
-  } else {
-    buf.write(recencyPreamble(followUp: true));
-  }
-  ChatMessage? lastUser;
-  for (final m in messages.reversed) {
-    if (!m.streaming && !m.queued && m.role == 'user') {
-      lastUser = m;
-      break;
-    }
-  }
-  if (!firstInTopic || replay) {
-    for (final m in messages) {
-      if (identical(m, lastUser) || m.streaming || m.queued) continue;
-      final t = m.text.trim();
-      if (t.isEmpty || isFailedAssistantText(t)) continue;
-      if (m.role == 'user') {
-        buf.writeln('用户：$t');
-      } else if (m.role == 'assistant') {
-        buf.writeln('助手：${_clipHistory(t)}');
-      }
-      buf.writeln();
-    }
-  }
-  buf.writeln('用户：$question');
-  return buf.toString();
-}
-
 /// Rebuild the thread as a single prompt when the same agent cannot continue.
 String conversationContinuityPrompt(
   List<ChatMessage> messages,
@@ -1375,18 +1642,13 @@ String conversationContinuityPrompt(
     if (identical(m, lastUser) || m.streaming) continue;
     final t = m.text.trim();
     if (t.isEmpty || isFailedAssistantText(t)) continue;
-    if (m.role == 'user') {
-      buf.writeln('用户：$t');
-    } else if (m.role == 'assistant') {
-      buf.writeln('助手：${_clipHistory(t)}');
+      if (m.role == 'user') {
+        buf.writeln('用户：$t');
+      } else if (m.role == 'assistant') {
+        buf.writeln('助手：${clipPromptHistory(t)}');
+      }
+      buf.writeln();
     }
-    buf.writeln();
-  }
-  buf.writeln('用户最后一句：$currentQuestion');
-  return buf.toString();
-}
-
-String _clipHistory(String text) {
-  if (text.length <= 4000) return text;
-  return '${text.substring(0, 4000)}…';
+    buf.writeln('用户最后一句：$currentQuestion');
+    return buf.toString();
 }

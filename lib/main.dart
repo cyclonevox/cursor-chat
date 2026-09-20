@@ -342,7 +342,7 @@ class _ConversationDrawerState extends State<ConversationDrawer> {
                       _DrawerSection(
                         title: '快速对话',
                         expanded: _topicsExpanded,
-                        selected: store.active?.sharesQuickAgent == true,
+                        selected: store.active?.kind == ConversationKind.topic,
                         addTooltip: '新对话',
                         addKey: const Key('drawer-add-topic'),
                         toggleKey: const Key('drawer-toggle-topics'),
@@ -351,12 +351,6 @@ class _ConversationDrawerState extends State<ConversationDrawer> {
                         onAdd: () {
                           setState(() => _topicsExpanded = true);
                           store.newChat();
-                          _close();
-                        },
-                        onTitleTap: () {
-                          final quick = store.quickChat;
-                          if (quick == null) return;
-                          store.selectChat(quick.id);
                           _close();
                         },
                       ),
@@ -424,7 +418,6 @@ class _DrawerSection extends StatelessWidget {
     required this.onAdd,
     required this.addTooltip,
     this.selected = false,
-    this.onTitleTap,
     this.addKey,
     this.toggleKey,
   });
@@ -435,7 +428,6 @@ class _DrawerSection extends StatelessWidget {
   final VoidCallback onToggle;
   final VoidCallback onAdd;
   final String addTooltip;
-  final VoidCallback? onTitleTap;
   final Key? addKey;
   final Key? toggleKey;
 
@@ -462,7 +454,7 @@ class _DrawerSection extends StatelessWidget {
             ),
             Expanded(
               child: InkWell(
-                onTap: onTitleTap ?? onToggle,
+                onTap: onToggle,
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Text(title, style: labelStyle),

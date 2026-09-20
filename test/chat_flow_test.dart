@@ -1,5 +1,9 @@
+import 'dart:async';
+
+import 'package:cursor_chat/api/cursor_api.dart';
 import 'package:cursor_chat/main.dart';
 import 'package:cursor_chat/models/models.dart';
+import 'package:cursor_chat/quick_prompt.dart';
 import 'package:cursor_chat/store.dart';
 import 'package:cursor_chat/title.dart';
 import 'package:flutter/material.dart';
@@ -100,22 +104,20 @@ void main() {
     expect(looksLikeQuestion(a.title), isFalse);
   });
 
-  test('topic prompt tags the thread so the model can separate chats', () {
-    final prompt = topicBoundaryPrompt(
-      topicId: 't1',
-      title: '天气',
+  test('topic prompt uses a stable #T- code without dumping follow-up history', () {
+    final prompt = quickTopicTurnPrompt(
+      topicCode: '#T-ABCDEF',
+      question: '那穿什么',
       messages: [
         ChatMessage(id: 'u1', role: 'user', text: '今天热不热'),
         ChatMessage(id: 'a1', role: 'assistant', text: '有点热。'),
         ChatMessage(id: 'u2', role: 'user', text: '那穿什么'),
       ],
-      question: '那穿什么',
-      firstInTopic: false,
     );
-    expect(prompt, contains('[话题 t1｜天气]'));
-    expect(prompt, contains('独立话题'));
-    expect(prompt, contains('今天热不热'));
+    expect(prompt, contains('#T-ABCDEF'));
     expect(prompt, contains('用户：那穿什么'));
+    expect(prompt.contains('今天热不热'), isFalse);
+    expect(prompt.contains('独立话题'), isFalse);
   });
 
   test('continuity prompt keeps prior Q&A and drops error bubbles', () {
@@ -182,14 +184,16 @@ void main() {
       store.apiKey = 'k';
       store.conversations.clear();
       store.newChat();
-      expect(store.quickChat, isNotNull);
+      expect(store.active!.kind, ConversationKind.topic);
+      expect(isTopicCode(store.active!.topicCode), isTrue);
 
       final first = store.send(text: '今天天气怎么样');
       await _until(() => store.active!.pendingRunId != null);
       final agent = store.quickAgentId;
       expect(agent, isNotNull);
       expect(api.createdPrompts, hasLength(1));
-      expect(api.createdPrompts.last, contains('[话题'));
+      expect(api.createdPrompts.last, contains('#T-'));
+      expect(api.createdPrompts.last, contains('你会同时处理多个互不干扰的话题'));
       api.finish(store.active!.pendingRunId!, '今天不错。');
       await first;
 
@@ -200,8 +204,13 @@ void main() {
       expect(store.quickAgentId, agent);
       expect(store.active!.agentId, agent);
       expect(api.createdPrompts, hasLength(2));
-      expect(api.createdPrompts.last, contains('[话题'));
+      expect(api.createdPrompts.last, contains('#T-'));
       expect(api.createdPrompts.last, contains('1+1等于几'));
+      expect(api.createdPrompts.last.contains('今天天气'), isFalse);
+      expect(
+        store.topicChats.map((c) => c.topicCode).toSet(),
+        hasLength(2),
+      );
       api.finish(store.active!.pendingRunId!, '2');
       await second;
     },
@@ -245,7 +254,7 @@ void main() {
     store.activeId = 'iso';
     await store.deleteChat('iso');
     expect(api.deletedAgents, contains('bc-gone'));
-    expect(store.quickChat, isNotNull);
+    expect(store.conversations.where((c) => c.kind == ConversationKind.quick), isEmpty);
   });
 
   testWidgets('typing in B works while A is still loading', (tester) async {
@@ -634,5 +643,178 @@ void main() {
     expect(find.textContaining('按书上的写法来'), findsOneWidget);
     expect(store.active!.messages.where((m) => m.role == 'user'), hasLength(2));
     expect(find.byTooltip('重发'), findsNothing);
+  });
+
+  test('nth new topic rotates the quick agent and old topics replay', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 3;
+    store.quickAgentRotateTokens = 0;
+    store.conversations.clear();
+
+    Future<void> talk(String text, String reply) async {
+      final fut = store.send(text: text);
+      await _until(() => store.active!.pendingRunId != null);
+      api.finish(store.active!.pendingRunId!, reply);
+      await fut;
+    }
+
+    store.newChat();
+    await talk('天气怎么样', '晴');
+    final firstAgent = store.quickAgentId;
+    final firstTopic = store.active!;
+    expect(firstAgent, isNotNull);
+    expect(firstTopic.agentId, firstAgent);
+
+    store.newChat();
+    await talk('1+1', '2');
+    expect(store.quickAgentId, firstAgent);
+
+    store.newChat();
+    await talk('现在几点', '三点');
+    expect(store.quickAgentId, isNot(firstAgent));
+    expect(store.active!.agentId, store.quickAgentId);
+    expect(
+      api.createdPrompts.any((p) => p.contains(kQuickAgentWarmup)),
+      isTrue,
+    );
+
+    store.selectChat(firstTopic.id);
+    await talk('明天呢', '也晴');
+    expect(api.createdPrompts.last, contains('话题回溯'));
+    expect(api.createdPrompts.last, contains('天气怎么样'));
+    expect(api.createdPrompts.last, contains('#T-'));
+    expect(store.active!.agentId, store.quickAgentId);
+  });
+
+  test('in-flight topic queues another topic instead of a second agent', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations.clear();
+
+    store.newChat();
+    final first = store.send(text: '天气怎么样');
+    await _until(() => store.active!.pendingRunId != null);
+    final firstId = store.active!.id;
+    final firstAgent = store.quickAgentId;
+
+    store.newChat();
+    unawaited(store.send(text: '1+1等于几'));
+    await _until(() => store.active!.messages.any((m) => m.queued));
+    expect(api.createdPrompts, hasLength(1));
+    expect(store.quickAgentId, firstAgent);
+
+    api.finish(
+      store.conversations.firstWhere((c) => c.id == firstId).pendingRunId!,
+      '晴',
+    );
+    await first;
+    await _until(() => api.createdPrompts.length == 2);
+    expect(store.quickAgentId, firstAgent);
+    expect(store.active!.agentId, firstAgent);
+    api.finish(store.active!.pendingRunId!, '2');
+    await _until(() => !store.isSending(store.activeId));
+  });
+
+  test('old-topic replay does not rotate again', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 3;
+    store.quickAgentRotateTokens = 0;
+    store.conversations.clear();
+
+    Future<void> talk(String text, String reply) async {
+      final fut = store.send(text: text);
+      await _until(() => store.active!.pendingRunId != null);
+      api.finish(store.active!.pendingRunId!, reply);
+      await fut;
+    }
+
+    store.newChat();
+    await talk('天气怎么样', '晴');
+    final firstTopic = store.active!;
+    store.newChat();
+    await talk('1+1', '2');
+    final secondTopic = store.active!;
+    store.newChat();
+    await talk('现在几点', '三点');
+    final rotated = store.quickAgentId;
+    expect(rotated, isNot(firstTopic.agentId));
+
+    store.selectChat(firstTopic.id);
+    await talk('明天呢', '也晴');
+    expect(store.quickAgentId, rotated);
+    expect(api.createdPrompts.last, contains('话题回溯'));
+
+    store.selectChat(secondTopic.id);
+    await talk('再加一', '3');
+    expect(store.quickAgentId, rotated);
+    expect(api.createdPrompts.last, contains('话题回溯'));
+    expect(api.createdPrompts.last, contains('1+1'));
+    expect(store.active!.agentId, rotated);
+  });
+
+  test('quick follow-up ERROR keeps the shared agent', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations.clear();
+
+    Future<void> talk(String text, String reply) async {
+      final fut = store.send(text: text);
+      await _until(() => store.active!.pendingRunId != null);
+      api.finish(store.active!.pendingRunId!, reply);
+      await fut;
+    }
+
+    store.newChat();
+    await talk('天气怎么样', '晴');
+    final firstTopic = store.active!;
+    final agent = store.quickAgentId;
+    store.newChat();
+    await talk('1+1', '2');
+    expect(store.quickAgentId, agent);
+
+    store.selectChat(firstTopic.id);
+    api.failRuns = true;
+    final follow = store.send(text: '明天呢');
+    await follow;
+    expect(store.quickAgentId, agent);
+    expect(
+      api.createdPrompts.where((p) => p.contains(kFirstTurnPrefix)).length,
+      1,
+    );
+    expect(store.error, isNotNull);
+  });
+
+  test('token threshold precreates and rotates on the next new topic', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 0;
+    store.quickAgentRotateTokens = 100;
+    store.conversations.clear();
+
+    store.newChat();
+    api.usageResponse = const AgentTokenUsage(
+      inputTokens: 40,
+      cacheReadTokens: 70,
+    );
+    final first = store.send(text: '很长的上下文');
+    await _until(() => store.active!.pendingRunId != null);
+    final firstAgent = store.quickAgentId;
+    api.finish(store.active!.pendingRunId!, '收到');
+    await first;
+    await _until(() => store.quickAgentLastInputTokens >= 100);
+
+    store.newChat();
+    final second = store.send(text: '新话题');
+    await _until(() => store.active!.pendingRunId != null);
+    expect(store.quickAgentId, isNot(firstAgent));
+    api.finish(store.active!.pendingRunId!, '好');
+    await second;
   });
 }

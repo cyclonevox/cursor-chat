@@ -105,6 +105,7 @@ class Conversation {
     required this.title,
     this.kind = ConversationKind.isolated,
     this.topicId,
+    this.topicCode,
     this.agentId,
     this.pendingRunId,
     this.titleFrozen = false,
@@ -117,20 +118,21 @@ class Conversation {
   String title;
   ConversationKind kind;
   String? topicId;
+  String? topicCode;
   bool titleFrozen;
   String? agentId;
   String? pendingRunId;
   final List<ChatMessage> messages;
   DateTime updatedAt;
 
-  bool get sharesQuickAgent =>
-      kind == ConversationKind.quick || kind == ConversationKind.topic;
+  bool get sharesQuickAgent => kind == ConversationKind.topic;
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
     'kind': kind.name,
     'topicId': topicId,
+    'topicCode': topicCode,
     'titleFrozen': titleFrozen,
     'agentId': agentId,
     'pendingRunId': pendingRunId,
@@ -145,6 +147,7 @@ class Conversation {
       title: title,
       kind: ConversationKind.parse(json['kind'] as String?),
       topicId: json['topicId'] as String?,
+      topicCode: json['topicCode'] as String?,
       titleFrozen: json['titleFrozen'] as bool? ?? title != '新对话',
       agentId: json['agentId'] as String?,
       pendingRunId: json['pendingRunId'] as String?,

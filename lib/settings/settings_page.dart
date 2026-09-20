@@ -22,6 +22,9 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController _key;
+  late final TextEditingController _rotateAfter;
+  late final TextEditingController _rotateTokens;
+  late final TextEditingController _remindEvery;
   late final Listenable _listen;
   SttRecommendation? _recommend;
   final Map<String, TextEditingController> _cloudFields = {};
@@ -32,6 +35,11 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _key = TextEditingController(text: store.apiKey);
+    _rotateAfter = TextEditingController(text: '${store.quickAgentRotateAfter}');
+    _rotateTokens = TextEditingController(
+      text: '${store.quickAgentRotateTokens}',
+    );
+    _remindEvery = TextEditingController(text: '${store.quickRuleRemindEvery}');
     _listen = Listenable.merge([store, store.modelStore]);
     unawaited(_loadRecommend());
   }
@@ -45,6 +53,9 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void dispose() {
     _key.dispose();
+    _rotateAfter.dispose();
+    _rotateTokens.dispose();
+    _remindEvery.dispose();
     for (final c in _cloudFields.values) {
       c.dispose();
     }
@@ -175,6 +186,36 @@ class _SettingsPageState extends State<SettingsPage> {
               Text(
                 '侧栏「快速对话」的 + 共用一只 Agent；「独立 Agent」的 + 才会再开一只。这里可以删掉云端残留，避免数量上限。',
                 style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 16),
+              Text('快速对话轮换', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              Text(
+                '话题多了或最近一轮用量变大时，会在后台另建一只并在下一个新话题无感切过去。'
+                '用量取最近一轮 input+cacheRead，不是窗口还剩多少。设为 0 表示关掉该项。'
+                '正在聊的话题不会中途换 Agent。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              _intSetting(
+                key: const Key('setting-rotate-after'),
+                label: '话题数上限',
+                controller: _rotateAfter,
+                onChanged: store.setQuickAgentRotateAfter,
+              ),
+              const SizedBox(height: 8),
+              _intSetting(
+                key: const Key('setting-rotate-tokens'),
+                label: '上下文用量上限（token）',
+                controller: _rotateTokens,
+                onChanged: store.setQuickAgentRotateTokens,
+              ),
+              const SizedBox(height: 8),
+              _intSetting(
+                key: const Key('setting-remind-every'),
+                label: '每隔多少轮复述编号规则',
+                controller: _remindEvery,
+                onChanged: store.setQuickRuleRemindEvery,
               ),
               const SizedBox(height: 12),
               Wrap(
@@ -510,6 +551,25 @@ class _SettingsPageState extends State<SettingsPage> {
         const SizedBox(height: 12),
       ],
     ];
+  }
+
+  Widget _intSetting({
+    required Key key,
+    required String label,
+    required TextEditingController controller,
+    required void Function(int) onChanged,
+  }) {
+    return TextField(
+      key: key,
+      controller: controller,
+      keyboardType: TextInputType.number,
+      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+      ),
+      onChanged: (v) => onChanged(int.tryParse(v) ?? 0),
+    );
   }
 }
 
