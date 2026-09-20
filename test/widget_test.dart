@@ -181,6 +181,39 @@ void main() {
     expect(store.active?.title, '新对话');
   });
 
+  testWidgets('tapping 快速对话 does not open a chat', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = ChatStore();
+    store.conversations
+      ..clear()
+      ..addAll([
+        Conversation(
+          id: 't-weather',
+          title: '今天热不热',
+          kind: ConversationKind.topic,
+        ),
+        Conversation(
+          id: 'iso',
+          title: '写个 PR',
+          kind: ConversationKind.isolated,
+        ),
+      ]);
+    store.activeId = 't-weather';
+
+    await tester.pumpWidget(ChatApp(store: store));
+    tester.state<ScaffoldState>(find.byType(Scaffold).first).openDrawer();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final drawer = find.byType(Drawer);
+    await tester.tap(
+      find.descendant(of: drawer, matching: find.text('快速对话')),
+    );
+    await tester.pump();
+    expect(store.activeId, 't-weather');
+    expect(store.active?.title, '今天热不热');
+  });
+
   testWidgets('app bar new action follows the current mode', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = ChatStore();

@@ -42,6 +42,21 @@ class AgentInfo {
   final String? status;
 }
 
+class AgentTokenUsage {
+  const AgentTokenUsage({
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.cacheReadTokens = 0,
+    this.cacheWriteTokens = 0,
+  });
+  final int inputTokens;
+  final int outputTokens;
+  final int cacheReadTokens;
+  final int cacheWriteTokens;
+
+  int get promptish => inputTokens + cacheReadTokens;
+}
+
 class ModelParamChoice {
   const ModelParamChoice({required this.value, this.displayName});
   final String value;
@@ -285,6 +300,15 @@ class CursorApi {
     return _agentInfo(json);
   }
 
+  Future<AgentTokenUsage> getAgentUsage(String agentId, {String? runId}) async {
+    var path = '/v1/agents/$agentId/usage';
+    if (runId != null && runId.isNotEmpty) {
+      path = '$path?runId=$runId';
+    }
+    final json = await _json('GET', path);
+    return _agentTokenUsageFrom(json, runId: runId);
+  }
+
   Future<List<AgentInfo>> listAgents({int limit = 100}) async {
     final json = await _json(
       'GET',
@@ -307,6 +331,45 @@ class CursorApi {
     status: json['status'] as String?,
   );
 
+  AgentTokenUsage _agentTokenUsageFrom(
+    Map<String, dynamic> json, {
+    String? runId,
+  }) {
+    final runs = json['runs'] is List ? json['runs'] as List : const [];
+    Map<String, dynamic>? picked;
+    if (runId != null && runId.isNotEmpty) {
+      for (final item in runs) {
+        if (item is Map && item['id'] == runId) {
+          picked = _usageMap(item['usage']);
+          break;
+        }
+      }
+    }
+    if (picked == null && runs.isNotEmpty) {
+      final first = runs.first;
+      picked = first is Map ? _usageMap(first['usage']) : null;
+    }
+    picked ??= _usageMap(json['totalUsage']);
+    return AgentTokenUsage(
+      inputTokens: _tokenCount(picked?['inputTokens']),
+      outputTokens: _tokenCount(picked?['outputTokens']),
+      cacheReadTokens: _tokenCount(picked?['cacheReadTokens']),
+      cacheWriteTokens: _tokenCount(picked?['cacheWriteTokens']),
+    );
+  }
+
+  Map<String, dynamic>? _usageMap(Object? raw) {
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    return null;
+  }
+
+  int _tokenCount(Object? value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return 0;
+  }
+
   Future<String> createRun({
     required String agentId,
     required String text,
@@ -324,8 +387,12 @@ class CursorApi {
         return run['id'] as String;
       } on CursorApiException catch (e) {
         last = e;
-        if (e.status != 409 || e.isStreamGone) rethrow;
-        await Future<void>.delayed(Duration(seconds: 1 + i));
+        if (e.status == 409 || e.status == 404) {
+          await Future<void>.delayed(Duration(seconds: 1 + i));
+          continue;
+        }
+        if (e.isStreamGone) rethrow;
+        rethrow;
       }
     }
     throw last ?? CursorApiException(409, 'agent_busy');

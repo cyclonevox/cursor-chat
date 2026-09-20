@@ -11,6 +11,8 @@ class FakeCursorApi extends CursorApi {
   final List<String> createdPrompts = [];
   final List<String> cancelledRuns = [];
   final List<String> deletedAgents = [];
+  final List<String> usageCalls = [];
+  AgentTokenUsage usageResponse = const AgentTokenUsage();
   List<AgentInfo> listedAgents = const [];
   Object? nextCreateError;
   Object? nextStreamError;
@@ -67,9 +69,13 @@ class FakeCursorApi extends CursorApi {
     _throwCreateIfNeeded();
     seq++;
     createdPrompts.add(text);
+    final runId = 'run-$seq';
+    if (name == '快速对话') {
+      _results[runId] = 'OK';
+    }
     return CreatedAgent(
       agentId: agentId ?? 'bc-$seq',
-      runId: 'run-$seq',
+      runId: runId,
       name: name,
     );
   }
@@ -94,6 +100,12 @@ class FakeCursorApi extends CursorApi {
 
   @override
   Future<AgentInfo> getAgent(String agentId) async => AgentInfo(id: agentId);
+
+  @override
+  Future<AgentTokenUsage> getAgentUsage(String agentId, {String? runId}) async {
+    usageCalls.add('$agentId|$runId');
+    return usageResponse;
+  }
 
   @override
   Future<Map<String, dynamic>> getRun(String agentId, String runId) async => {

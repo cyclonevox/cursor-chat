@@ -9,9 +9,11 @@ void main() {
   late HttpServer server;
   late CursorApi api;
   Map<String, dynamic>? lastCreateBody;
+  String? lastUsageQuery;
 
   setUp(() async {
     lastCreateBody = null;
+    lastUsageQuery = null;
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((req) async {
       final path = req.uri.path;
@@ -195,6 +197,51 @@ void main() {
         await sendJson(200, {'id': 'bc-test'});
         return;
       }
+      if (req.method == 'GET' && path == '/v1/agents/bc-test/usage') {
+        lastUsageQuery = req.uri.query;
+        await sendJson(200, {
+          'totalUsage': {
+            'inputTokens': 1000,
+            'outputTokens': 2000,
+            'cacheWriteTokens': 3000,
+            'cacheReadTokens': 4000,
+          },
+          'runs': [
+            {
+              'id': 'run-first',
+              'usage': {
+                'inputTokens': 1,
+                'outputTokens': 2,
+                'cacheWriteTokens': 3,
+                'cacheReadTokens': 4,
+              },
+            },
+            {
+              'id': 'run-match',
+              'usage': {
+                'inputTokens': 10.0,
+                'outputTokens': 20,
+                'cacheWriteTokens': 30.5,
+                'cacheReadTokens': 40,
+              },
+            },
+          ],
+        });
+        return;
+      }
+      if (req.method == 'GET' && path == '/v1/agents/bc-total/usage') {
+        lastUsageQuery = req.uri.query;
+        await sendJson(200, {
+          'totalUsage': {
+            'inputTokens': 11,
+            'outputTokens': 22,
+            'cacheWriteTokens': 33,
+            'cacheReadTokens': 44,
+          },
+          'runs': [],
+        });
+        return;
+      }
       req.response.statusCode = 404;
       await req.response.close();
     });
@@ -261,6 +308,41 @@ void main() {
     final items = await api.listAgents();
     expect(items.single.id, 'bc-test');
     await api.deleteAgent('bc-test');
+  });
+
+  test('getAgentUsage prefers first run over totalUsage', () async {
+    final usage = await api.getAgentUsage('bc-test');
+    expect(lastUsageQuery, '');
+    expect(usage.inputTokens, 1);
+    expect(usage.outputTokens, 2);
+    expect(usage.cacheWriteTokens, 3);
+    expect(usage.cacheReadTokens, 4);
+    expect(usage.promptish, 5);
+  });
+
+  test('getAgentUsage uses the matching run when runId is set', () async {
+    final usage = await api.getAgentUsage('bc-test', runId: 'run-match');
+    expect(lastUsageQuery, 'runId=run-match');
+    expect(usage.inputTokens, 10);
+    expect(usage.outputTokens, 20);
+    expect(usage.cacheWriteTokens, 30);
+    expect(usage.cacheReadTokens, 40);
+    expect(usage.promptish, 50);
+  });
+
+  test('getAgentUsage uses first run when runId is not listed', () async {
+    final usage = await api.getAgentUsage('bc-test', runId: 'run-unknown');
+    expect(usage.inputTokens, 1);
+    expect(usage.outputTokens, 2);
+  });
+
+  test('getAgentUsage falls back to totalUsage when runs are empty', () async {
+    final usage = await api.getAgentUsage('bc-total');
+    expect(usage.inputTokens, 11);
+    expect(usage.outputTokens, 22);
+    expect(usage.cacheWriteTokens, 33);
+    expect(usage.cacheReadTokens, 44);
+    expect(usage.promptish, 55);
   });
 
   test('createRun follow-up', () async {
