@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:speech_to_text/speech_to_text.dart';
 
+import 'pcm_recorder.dart';
 import 'stt_engine.dart';
 
 class SystemSttEngine implements SttEngine {
@@ -45,7 +46,7 @@ class SystemSttEngine implements SttEngine {
         cancelOnError: false,
       ),
       onSoundLevelChange: (level) {
-        _onLevel?.call((level.abs() / 10).clamp(0.0, 1.0));
+        _onLevel?.call(mapSystemSoundLevel(level));
       },
       onResult: (r) {
         _text = r.recognizedWords;

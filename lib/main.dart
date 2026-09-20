@@ -14,13 +14,18 @@ import 'settings/settings_page.dart';
 import 'store.dart';
 import 'theme.dart';
 import 'voice/create_engine.dart';
-import 'voice/pcm_recorder.dart';
 import 'voice/stt_engine.dart';
+import 'voice/voice_settings.dart';
 import 'widgets/answer_body.dart';
 import 'widgets/frosted.dart';
 import 'widgets/voice_listening_bar.dart';
 
 export 'settings/settings_page.dart';
+
+/// `flutter run --dart-define=VOICE_UI_PROBE=true` enables a throwaway
+/// in-memory voice config and starts listening once, so the meter can be
+/// screenshotted without writing settings.
+const kVoiceUiProbe = bool.fromEnvironment('VOICE_UI_PROBE');
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +33,15 @@ Future<void> main() async {
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   final store = ChatStore();
   await store.load();
+  if (kVoiceUiProbe) {
+    if (Platform.isAndroid) {
+      store.voiceMode = VoiceMode.system;
+    } else {
+      store.voiceMode = VoiceMode.cloud;
+      store.cloudSttProvider = 'aliyun';
+      store.cloudSecrets['aliyun'] = const CloudSttSecrets(apiKey: 'probe');
+    }
+  }
   runApp(ChatApp(store: store));
 }
 
@@ -764,14 +778,18 @@ class _ComposerState extends State<Composer> {
   SttEngine? _stt;
   Timer? _voiceClock;
   Duration _voiceElapsed = Duration.zero;
-  final List<double> _voiceLevels = List<double>.filled(56, 0);
-  bool _voiceLevelDirty = false;
+  final List<double> _voicePending = [];
 
   @override
   void initState() {
     super.initState();
     if (Platform.isAndroid) {
       unawaited(_recoverLostCrop());
+    }
+    if (kVoiceUiProbe) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_startVoice());
+      });
     }
   }
 
@@ -797,16 +815,12 @@ class _ComposerState extends State<Composer> {
     _voiceClock?.cancel();
     _voiceClock = null;
     _voiceElapsed = Duration.zero;
-    for (var i = 0; i < _voiceLevels.length; i++) {
-      _voiceLevels[i] = 0;
-    }
+    _voicePending.clear();
   }
 
   void _beginVoiceVisual() {
     _voiceElapsed = Duration.zero;
-    for (var i = 0; i < _voiceLevels.length; i++) {
-      _voiceLevels[i] = 0;
-    }
+    _voicePending.clear();
     _voiceClock?.cancel();
     _voiceClock = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || !_listening) return;
@@ -816,14 +830,7 @@ class _ComposerState extends State<Composer> {
 
   void _onVoiceLevel(double level) {
     if (!mounted || !_listening) return;
-    _voiceLevels.removeAt(0);
-    _voiceLevels.add(boostVoiceMeter(level));
-    if (_voiceLevelDirty) return;
-    _voiceLevelDirty = true;
-    scheduleMicrotask(() {
-      _voiceLevelDirty = false;
-      if (mounted && _listening) setState(() {});
-    });
+    _voicePending.add(level.clamp(0.0, 1.0));
   }
 
   void _hideKeyboard() {
@@ -1125,7 +1132,7 @@ class _ComposerState extends State<Composer> {
                           if (_listening || _transcribing)
                             VoiceListeningBar(
                               key: const Key('composer-voice-meter'),
-                              levels: List<double>.from(_voiceLevels),
+                              pending: _voicePending,
                               elapsed: _voiceElapsed,
                               transcribing: _transcribing,
                             ),

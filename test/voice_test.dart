@@ -35,6 +35,7 @@ class FakeSttEngine implements SttEngine {
   final Duration? finishDelay;
   bool cancelled = false;
   void Function(String partial)? lastPartial;
+  Timer? _levelTick;
 
   @override
   bool get streaming => true;
@@ -46,16 +47,25 @@ class FakeSttEngine implements SttEngine {
   }) async {
     lastPartial = onPartial;
     onPartial?.call(partial);
+    var i = 0;
+    _levelTick = Timer.periodic(const Duration(milliseconds: 40), (_) {
+      i++;
+      final t = i % 24;
+      final v = t < 10 ? 0.08 + 0.75 * (t / 9) : 0.03;
+      onLevel?.call(v);
+    });
   }
 
   @override
   Future<String> finish() async {
+    _levelTick?.cancel();
     if (finishDelay != null) await Future<void>.delayed(finishDelay!);
     return finalText;
   }
 
   @override
   Future<void> cancel() async {
+    _levelTick?.cancel();
     cancelled = true;
   }
 }
@@ -446,11 +456,11 @@ void main() {
             child: SizedBox(
               width: 200,
               child: VoiceListeningBar(
-                levels: [
+                elapsed: Duration(seconds: 7),
+                debugLevels: [
                   0.05, 0.08, 0.1, 0.12, 0.2, 0.35, 0.7, 1, 0.85, 0.4,
                   0.18, 0.1, 0.08, 0.06, 0.05, 0.04, 0.04, 0.05, 0.06, 0.05,
                 ],
-                elapsed: Duration(seconds: 7),
               ),
             ),
           ),
@@ -466,6 +476,37 @@ void main() {
     final timer = tester.getRect(find.byKey(const Key('composer-voice-elapsed')));
     expect(timer.left, greaterThan(wave.right));
     expect(find.text('0:07'), findsOneWidget);
+  });
+
+  testWidgets('waveform tape scrolls and keeps loud bursts', (tester) async {
+    final pending = <double>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 280,
+              child: VoiceListeningBar(
+                pending: pending,
+                elapsed: Duration.zero,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final state = tester.state<VoiceListeningBarState>(
+      find.byType(VoiceListeningBar),
+    );
+    pending.addAll([0.95, 0.9, 0.85, 0.2, 0.08, 0.95, 0.9]);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 80));
+    expect(state.tape.any((v) => v > 0.7), isTrue);
+    final first = List<double>.from(state.tape);
+    pending.addAll([0.1, 0.1, 0.1, 0.95, 0.95, 0.1]);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(List<double>.from(state.tape), isNot(first));
   });
 
   testWidgets('listening replaces the input with a waveform and timer', (
@@ -518,8 +559,11 @@ void main() {
     loud[3] = 0x40;
     expect(pcm16Rms(loud), greaterThan(0.4));
     expect(pcm16Vu(loud), greaterThan(pcm16Rms(loud)));
-    expect(boostVoiceMeter(0.04), greaterThan(0.1));
-    expect(boostVoiceMeter(0.04), lessThan(0.3));
+    expect(boostVoiceMeter(0.01), greaterThan(0.25));
+    expect(boostVoiceMeter(0.04), greaterThan(0.45));
+    expect(boostVoiceMeter(0.04), lessThan(0.85));
+    expect(mapSystemSoundLevel(8), greaterThan(0.7));
+    expect(mapSystemSoundLevel(0.04), greaterThan(0.45));
     expect(pcmLooksSilent(Uint8List(0)), isTrue);
     expect(pcmLooksSilent(Uint8List(6400)), isTrue);
     final speech = Uint8List(6400);

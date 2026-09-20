@@ -34,11 +34,22 @@ double pcm16Vu(Uint8List bytes) {
   return (rms * 0.35 + peak * 0.8).clamp(0.0, 1.0);
 }
 
-/// Map mic energy to bar height without flattening loud speech to a flat max.
+/// Map linear PCM amplitude to bar height. Laptop mics often sit around
+/// 0.005–0.04 RMS while talking; those must already look like a burst.
 double boostVoiceMeter(double level) {
   final x = level.clamp(0.0, 1.0);
-  if (x < 0.006) return 0;
-  return (x * 3.6).clamp(0.0, 1.0);
+  if (x < 0.0006) return 0;
+  final db = 20 * math.log(x) / math.ln10;
+  return ((db + 55) / 42).clamp(0.0, 1.0);
+}
+
+/// Android SpeechRecognizer levels are undocumented (often ~0–10, sometimes already 0–1).
+double mapSystemSoundLevel(double raw) {
+  final a = raw.abs();
+  if (a > 1.2) {
+    return math.pow((a / 10).clamp(0.0, 1.0), 0.75).toDouble();
+  }
+  return boostVoiceMeter(a);
 }
 
 /// Split PCM into ~20ms peak windows so the tape has syllable-shaped bars.
@@ -113,7 +124,7 @@ class PcmRecorder {
           final cb = onLevel;
           if (cb != null) {
             for (final v in pcm16VuWindows(bytes)) {
-              cb(v);
+              cb(boostVoiceMeter(v));
             }
           }
         },
