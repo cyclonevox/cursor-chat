@@ -35,7 +35,13 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   List<CursorModel> models = [];
   final List<Conversation> conversations = [];
   String? activeId;
+  String? quickAgentId;
   final Set<String> _inFlight = {};
+  final Set<String> _cancelRequested = {};
+  final Map<String, CancelToken> _cancelTokens = {};
+  List<AgentInfo> cloudAgents = [];
+  bool loadingCloudAgents = false;
+  String? cloudAgentsError;
   String? error;
   String? errorChatId;
   String? modelsError;
@@ -63,6 +69,32 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
 
   /// True only while the *active* chat is waiting on a reply.
   bool get sending => isSending(activeId);
+
+  bool isQueued(String? id) {
+    if (id == null) return false;
+    for (final c in conversations) {
+      if (c.id != id) continue;
+      return c.messages.any((m) => m.queued);
+    }
+    return false;
+  }
+
+  Conversation? get quickChat {
+    for (final c in conversations) {
+      if (c.kind == ConversationKind.quick) return c;
+    }
+    return null;
+  }
+
+  List<Conversation> get topicChats => [
+    for (final c in conversations)
+      if (c.kind == ConversationKind.topic) c,
+  ];
+
+  List<Conversation> get isolatedChats => [
+    for (final c in conversations)
+      if (c.kind == ConversationKind.isolated) c,
+  ];
 
   @override
   CloudSttSecrets cloudSecret(String providerId) =>
@@ -195,9 +227,16 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
               Conversation.fromJson(c as Map<String, dynamic>),
           ]);
         activeId = data['activeId'] as String?;
+        quickAgentId = data['quickAgentId'] as String?;
       }
     } catch (_) {}
-    if (conversations.isEmpty) newChat();
+    _ensureQuickChat();
+    if (activeId == null ||
+        !conversations.any((c) => c.id == activeId)) {
+      activeId = quickChat?.id ?? conversations.first.id;
+    }
+    _sortConversations();
+    unawaited(_persist());
     notifyListeners();
     unawaited(
       modelStore.refreshAll().then((_) => notifyListeners()).catchError((_) {}),
@@ -377,10 +416,48 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     modelParams = m.alignedParams(modelParams);
   }
 
+  Conversation _ensureQuickChat() {
+    final existing = quickChat;
+    if (existing != null) return existing;
+    final c = Conversation(
+      id: uuid.v4(),
+      title: '快速对话',
+      kind: ConversationKind.quick,
+      topicId: 'quick',
+      titleFrozen: true,
+      agentId: quickAgentId,
+    );
+    conversations.insert(0, c);
+    return c;
+  }
+
+  /// New topic on the shared daily agent. Does not create a Cloud Agent.
   void newChat() {
-    final c = Conversation(id: uuid.v4(), title: '新对话');
+    final quick = _ensureQuickChat();
+    final c = Conversation(
+      id: uuid.v4(),
+      title: '新对话',
+      kind: ConversationKind.topic,
+      topicId: uuid.v4(),
+      agentId: quickAgentId ?? quick.agentId,
+    );
+    conversations.add(c);
+    activeId = c.id;
+    _sortConversations();
+    notifyListeners();
+    unawaited(_persist());
+  }
+
+  /// Isolated Cloud Agent. First send calls POST /v1/agents.
+  void newAgentChat() {
+    final c = Conversation(
+      id: uuid.v4(),
+      title: '新 Agent',
+      kind: ConversationKind.isolated,
+    );
     conversations.insert(0, c);
     activeId = c.id;
+    _sortConversations();
     notifyListeners();
     unawaited(_persist());
   }
@@ -391,14 +468,64 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     unawaited(_persist());
   }
 
-  void deleteChat(String id) {
+  Future<void> deleteChat(String id) async {
+    Conversation? conv;
+    for (final c in conversations) {
+      if (c.id == id) conv = c;
+    }
+    if (conv == null || conv.kind == ConversationKind.quick) return;
+    final agentId = conv.agentId;
+    final isolated = conv.kind == ConversationKind.isolated;
     conversations.removeWhere((c) => c.id == id);
     if (activeId == id) {
       activeId = conversations.isEmpty ? null : conversations.first.id;
     }
-    if (conversations.isEmpty) newChat();
+    _ensureQuickChat();
+    activeId ??= quickChat?.id;
+    _sortConversations();
     notifyListeners();
     unawaited(_persist());
+    if (isolated && agentId != null && agentId.isNotEmpty) {
+      try {
+        await _api?.deleteAgent(agentId);
+      } catch (_) {}
+    }
+  }
+
+  int _kindRank(ConversationKind kind) => switch (kind) {
+    ConversationKind.quick => 0,
+    ConversationKind.topic => 1,
+    ConversationKind.isolated => 2,
+  };
+
+  void _sortConversations() {
+    conversations.sort((a, b) {
+      final rank = _kindRank(a.kind).compareTo(_kindRank(b.kind));
+      if (rank != 0) return rank;
+      return b.updatedAt.compareTo(a.updatedAt);
+    });
+  }
+
+  String? _resolvedAgentId(Conversation conv) {
+    if (conv.sharesQuickAgent) return conv.agentId ?? quickAgentId;
+    return conv.agentId;
+  }
+
+  bool _isAgentBusy(String? agentId) {
+    if (agentId == null || agentId.isEmpty) {
+      return false;
+    }
+    for (final c in conversations) {
+      if (_inFlight.contains(c.id) && _resolvedAgentId(c) == agentId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _shouldQueue(Conversation conv) {
+    if (_inFlight.contains(conv.id)) return true;
+    return _isAgentBusy(_resolvedAgentId(conv));
   }
 
   void clearError() {
@@ -460,6 +587,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   Future<void> send({
     required String text,
     List<PromptImage> images = const [],
+    bool insertNow = false,
   }) async {
     final api = _api;
     if (api == null) {
@@ -470,30 +598,98 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     }
     var conv = active;
     if (conv == null) {
-      newChat();
-      conv = active!;
+      _ensureQuickChat();
+      conv = active ?? quickChat;
+      if (conv == null) {
+        newChat();
+        conv = active!;
+      } else {
+        activeId = conv.id;
+      }
     }
     final trimmed = text.trim();
     if (trimmed.isEmpty && images.isEmpty) return;
-    if (_inFlight.contains(conv.id)) return;
+
+    if (insertNow && _shouldQueue(conv)) {
+      Conversation? busy;
+      final agentId = _resolvedAgentId(conv);
+      for (final c in conversations) {
+        if (_inFlight.contains(c.id) &&
+            (agentId == null || _resolvedAgentId(c) == agentId)) {
+          busy = c;
+          break;
+        }
+      }
+      if (busy != null) await cancelGeneration(chatId: busy.id);
+    }
 
     final displayText = trimmed.isEmpty ? '（图片）' : trimmed;
-    conv.messages.add(
-      ChatMessage(
-        id: uuid.v4(),
-        role: 'user',
-        text: displayText,
-        imagePaths: [
-          for (final img in images)
-            if (img.path != null) img.path!,
-        ],
-      ),
+    final user = ChatMessage(
+      id: uuid.v4(),
+      role: 'user',
+      text: displayText,
+      queued: _shouldQueue(conv),
+      rush: insertNow,
+      imagePaths: [
+        for (final img in images)
+          if (img.path != null) img.path!,
+      ],
     );
+    conv.messages.add(user);
     if (!conv.titleFrozen) {
       conv.title = conversationTitle(displayText);
     }
     conv.updatedAt = DateTime.now();
+    error = null;
+    errorChatId = null;
+    notifyListeners();
+    unawaited(_persist());
 
+    if (user.queued) return;
+    await _launchTurn(api, conv, user, images);
+  }
+
+  Future<void> cancelGeneration({String? chatId}) async {
+    Conversation? conv;
+    if (chatId != null) {
+      for (final c in conversations) {
+        if (c.id == chatId) conv = c;
+      }
+    } else {
+      conv = active;
+    }
+    if (conv == null || !_inFlight.contains(conv.id)) return;
+    _cancelRequested.add(conv.id);
+    _cancelTokens[conv.id]?.cancel();
+    final agentId = _resolvedAgentId(conv);
+    final runId = conv.pendingRunId;
+    if (agentId != null && runId != null && runId.isNotEmpty) {
+      try {
+        await _api?.cancelRun(agentId, runId);
+      } catch (_) {}
+    }
+  }
+
+  void removeQueued(String messageId) {
+    for (final c in conversations) {
+      final before = c.messages.length;
+      c.messages.removeWhere((m) => m.id == messageId && m.queued);
+      if (c.messages.length != before) {
+        notifyListeners();
+        unawaited(_persist());
+        return;
+      }
+    }
+  }
+
+  Future<void> _launchTurn(
+    CursorApi api,
+    Conversation conv,
+    ChatMessage user,
+    List<PromptImage> images,
+  ) async {
+    user.queued = false;
+    user.rush = false;
     final assistant = ChatMessage(
       id: uuid.v4(),
       role: 'assistant',
@@ -502,24 +698,46 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     );
     conv.messages.add(assistant);
     _inFlight.add(conv.id);
-    error = null;
-    errorChatId = null;
     notifyListeners();
     unawaited(_persist());
 
-    final question = _questionFromUserText(trimmed);
+    final question = _questionFromUserText(
+      user.text == '（图片）' ? '' : user.text,
+    );
     final userTurns = conv.messages.where((m) => m.role == 'user').length;
-    final conversation = conv;
     await _withWakeLock(() async {
       await _driveTurn(
         api: api,
-        conversation: conversation,
+        conversation: conv,
         assistant: assistant,
         question: question,
         images: images,
         userTurns: userTurns,
       );
     });
+  }
+
+  Future<void> _drainQueued(String? agentId) async {
+    if (agentId != null && _isAgentBusy(agentId)) return;
+    ChatMessage? pick;
+    Conversation? host;
+    for (final c in conversations) {
+      if (agentId != null && _resolvedAgentId(c) != agentId) continue;
+      if (agentId == null && _resolvedAgentId(c) != null) continue;
+      if (_inFlight.contains(c.id)) continue;
+      for (final m in c.messages) {
+        if (m.role != 'user' || !m.queued) continue;
+        if (pick == null || (m.rush && !pick.rush)) {
+          pick = m;
+          host = c;
+        }
+      }
+    }
+    if (pick == null || host == null) return;
+    final api = _api;
+    if (api == null) return;
+    final images = await _imagesFor(pick);
+    await _launchTurn(api, host, pick, images);
   }
 
   /// Resend the last user turn in place. Does not add another user bubble.
@@ -585,12 +803,13 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     required int userTurns,
     bool resumeExisting = false,
   }) async {
-    final apiText = userTurns <= 1
-        ? '$kFirstTurnPrefix${recencyPreamble()}$question'
-        : '${recencyPreamble(followUp: true)}$question';
+    final apiText = _promptForTurn(conversation, question, userTurns);
     try {
       Object? fail;
       try {
+        if (_cancelRequested.remove(conversation.id)) {
+          throw RunFailedException('CANCELLED');
+        }
         if (resumeExisting &&
             conversation.agentId != null &&
             conversation.pendingRunId != null &&
@@ -603,16 +822,37 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
             conversation.pendingRunId!,
           );
         } else {
+          final hadQuickAgent = quickAgentId != null && quickAgentId!.isNotEmpty;
           if (conversation.agentId == null) {
-            conversation.agentId = 'bc-${uuid.v4()}';
+            conversation.agentId = conversation.sharesQuickAgent
+                ? (quickAgentId ?? 'bc-${uuid.v4()}')
+                : 'bc-${uuid.v4()}';
+            if (conversation.sharesQuickAgent && !hadQuickAgent) {
+              quickAgentId = conversation.agentId;
+            }
             unawaited(_persist());
           }
-          final created = userTurns <= 1
-              ? await _createFirstRun(api, conversation, apiText, images)
-              : await _createFollowUp(api, conversation, apiText, images);
+          final reuseAgent = conversation.sharesQuickAgent
+              ? hadQuickAgent
+              : userTurns > 1;
+          if (_cancelRequested.remove(conversation.id)) {
+            throw RunFailedException('CANCELLED');
+          }
+          final created = reuseAgent
+              ? await _createFollowUp(api, conversation, apiText, images)
+              : await _createFirstRun(api, conversation, apiText, images);
           conversation.agentId = created.agentId;
+          if (conversation.sharesQuickAgent) {
+            _bindQuickAgent(created.agentId);
+          }
           conversation.pendingRunId = created.runId;
           unawaited(_persist());
+          if (_cancelRequested.remove(conversation.id)) {
+            try {
+              await api.cancelRun(created.agentId, created.runId);
+            } catch (_) {}
+            throw RunFailedException('CANCELLED');
+          }
           await _collectRun(
             api,
             conversation,
@@ -650,15 +890,22 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
         }
       }
       if (fail != null) {
-        error = friendlyNetworkError(fail);
-        errorChatId = conversation.id;
-        if (assistant.text.isEmpty || isFailedAssistantText(assistant.text)) {
-          assistant.text = '出错了：$error';
+        if (fail is RunFailedException && fail.status == 'CANCELLED') {
+          assistant.text = fail.userMessage;
+          conversation.pendingRunId = null;
+          error = null;
+          errorChatId = null;
+        } else {
+          error = friendlyNetworkError(fail);
+          errorChatId = conversation.id;
+          if (assistant.text.isEmpty || isFailedAssistantText(assistant.text)) {
+            assistant.text = '出错了：$error';
+          }
+          if (fail is RunFailedException || !isTransientNetworkError(fail)) {
+            conversation.pendingRunId = null;
+          }
         }
         assistant.streaming = false;
-        if (fail is RunFailedException || !isTransientNetworkError(fail)) {
-          conversation.pendingRunId = null;
-        }
       }
     } finally {
       await _endSend(conversation);
@@ -667,10 +914,39 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
 
   Future<void> _endSend(Conversation conv) async {
     _inFlight.remove(conv.id);
+    _cancelTokens.remove(conv.id);
+    _cancelRequested.remove(conv.id);
     conv.updatedAt = DateTime.now();
-    conversations.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    _sortConversations();
     notifyListeners();
     unawaited(_persist());
+    unawaited(_drainQueued(_resolvedAgentId(conv)));
+  }
+
+  void _bindQuickAgent(String agentId) {
+    quickAgentId = agentId;
+    for (final c in conversations) {
+      if (c.sharesQuickAgent) c.agentId = agentId;
+    }
+  }
+
+  String _promptForTurn(
+    Conversation conv,
+    String question,
+    int userTurns,
+  ) {
+    if (!conv.sharesQuickAgent) {
+      return userTurns <= 1
+          ? '$kFirstTurnPrefix${recencyPreamble()}$question'
+          : '${recencyPreamble(followUp: true)}$question';
+    }
+    return topicBoundaryPrompt(
+      topicId: conv.topicId ?? conv.id,
+      title: conv.title,
+      messages: conv.messages,
+      question: question,
+      firstInTopic: userTurns <= 1,
+    );
   }
 
   void _refreshTitle(Conversation conv) {
@@ -776,8 +1052,17 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   ) async {
     conv.agentId = 'bc-${uuid.v4()}';
     conv.pendingRunId = null;
-    final apiText =
-        '$kFirstTurnPrefix${recencyPreamble()}${conversationContinuityPrompt(conv.messages, question)}';
+    if (conv.sharesQuickAgent) _bindQuickAgent(conv.agentId!);
+    final apiText = conv.sharesQuickAgent
+        ? topicBoundaryPrompt(
+            topicId: conv.topicId ?? conv.id,
+            title: conv.title,
+            messages: conv.messages,
+            question: question,
+            firstInTopic: true,
+            replay: true,
+          )
+        : '$kFirstTurnPrefix${recencyPreamble()}${conversationContinuityPrompt(conv.messages, question)}';
     final created = await _createFirstRun(api, conv, apiText, images);
     conv.agentId = created.agentId;
     conv.pendingRunId = created.runId;
@@ -815,9 +1100,15 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
 
     var finalText = '';
     try {
+      final token = CancelToken();
+      _cancelTokens[conv.id] = token;
+      if (_cancelRequested.contains(conv.id)) {
+        token.cancel();
+      }
       finalText = await api.streamRun(
         agentId: agentId,
         runId: runId,
+        cancelToken: token,
         onDelta: (delta) {
           assistant.text += delta;
           notifyListeners();
@@ -903,6 +1194,52 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     return _persistChain;
   }
 
+  Future<void> refreshCloudAgents() async {
+    final api = _api;
+    if (api == null) {
+      cloudAgentsError = '先在设置里填入 Cursor API Key';
+      notifyListeners();
+      return;
+    }
+    loadingCloudAgents = true;
+    cloudAgentsError = null;
+    notifyListeners();
+    try {
+      cloudAgents = await api.listAgents();
+    } catch (e) {
+      cloudAgentsError = friendlyNetworkError(e);
+    } finally {
+      loadingCloudAgents = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> deleteCloudAgent(String agentId) async {
+    final api = _api;
+    if (api == null) return;
+    try {
+      await api.deleteAgent(agentId);
+    } catch (e) {
+      cloudAgentsError = friendlyNetworkError(e);
+      notifyListeners();
+      return;
+    }
+    if (quickAgentId == agentId) {
+      quickAgentId = null;
+      for (final c in conversations) {
+        if (c.sharesQuickAgent && c.agentId == agentId) c.agentId = null;
+      }
+    }
+    for (final c in conversations) {
+      if (c.kind == ConversationKind.isolated && c.agentId == agentId) {
+        c.agentId = null;
+      }
+    }
+    cloudAgents.removeWhere((a) => a.id == agentId);
+    notifyListeners();
+    unawaited(_persist());
+  }
+
   Future<void> _writeConversations() async {
     try {
       final dir = await getApplicationDocumentsDirectory();
@@ -910,6 +1247,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
       await file.writeAsString(
         jsonEncode({
           'activeId': activeId,
+          'quickAgentId': quickAgentId,
           'items': [for (final c in conversations) c.toJson()],
         }),
       );
@@ -963,13 +1301,56 @@ Future<List<PromptImage>> _imagesFor(ChatMessage user) async {
 }
 
 bool shouldReplayAsNewAgent(Object e) {
-  if (e is RunFailedException) return true;
+  if (e is RunFailedException) return e.status != 'CANCELLED';
   if (e is CursorApiException) {
     if (e.status == 404) return true;
     final b = e.body.toLowerCase();
     if (b.contains('not_found') || b.contains('not found')) return true;
   }
   return false;
+}
+
+String topicBoundaryPrompt({
+  required String topicId,
+  required String title,
+  required List<ChatMessage> messages,
+  required String question,
+  required bool firstInTopic,
+  bool replay = false,
+}) {
+  final buf = StringBuffer()
+    ..writeln('[话题 $topicId｜$title]')
+    ..writeln('这是快速对话里的独立话题。只根据本话题上下文回答；')
+    ..writeln('不要沿用其他话题的结论，除非用户明确要求对照。')
+    ..writeln();
+  if (firstInTopic || replay) {
+    buf.write(kFirstTurnPrefix);
+    buf.write(recencyPreamble());
+  } else {
+    buf.write(recencyPreamble(followUp: true));
+  }
+  ChatMessage? lastUser;
+  for (final m in messages.reversed) {
+    if (!m.streaming && !m.queued && m.role == 'user') {
+      lastUser = m;
+      break;
+    }
+  }
+  if (!firstInTopic || replay) {
+    for (final m in messages) {
+      if (identical(m, lastUser) || m.streaming || m.queued) continue;
+      final t = m.text.trim();
+      if (t.isEmpty || isFailedAssistantText(t)) continue;
+      if (m.role == 'user') {
+        buf.writeln('用户：$t');
+      } else if (m.role == 'assistant') {
+        buf.writeln('助手：${_clipHistory(t)}');
+      }
+      buf.writeln();
+    }
+  }
+  buf.writeln('用户：$question');
+  return buf.toString();
 }
 
 /// Rebuild the thread as a single prompt when the same agent cannot continue.

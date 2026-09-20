@@ -141,7 +141,7 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               ..._modelSection(context),
               Text(
-                '已开始的对话沿用当时的模型；改档位后请开新对话。',
+                '已开始的对话沿用当时的模型；改档位后请在侧栏「独立 Agent」点 + 新开一只。快速对话换话题不会换模型。',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 8),
@@ -169,6 +169,80 @@ class _SettingsPageState extends State<SettingsPage> {
                       },
                 child: Text(store.loadingModels ? '正在刷新…' : '保存并刷新模型'),
               ),
+              const SizedBox(height: 32),
+              Text('云端 Agent', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              Text(
+                '侧栏「快速对话」的 + 共用一只 Agent；「独立 Agent」的 + 才会再开一只。这里可以删掉云端残留，避免数量上限。',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.tonal(
+                    key: const Key('refresh-cloud-agents'),
+                    onPressed: store.loadingCloudAgents
+                        ? null
+                        : () => unawaited(store.refreshCloudAgents()),
+                    child: Text(store.loadingCloudAgents ? '正在拉取…' : '刷新列表'),
+                  ),
+                  if (store.quickAgentId != null)
+                    TextButton(
+                      key: const Key('reset-quick-agent'),
+                      onPressed: () async {
+                        final id = store.quickAgentId;
+                        if (id == null) return;
+                        await store.deleteCloudAgent(id);
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('已删快速 Agent，下次发送会再建一只')),
+                        );
+                      },
+                      child: const Text('重建快速对话 Agent'),
+                    ),
+                ],
+              ),
+              if (store.cloudAgentsError != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  store.cloudAgentsError!,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              if (store.cloudAgents.isEmpty && !store.loadingCloudAgents)
+                Text(
+                  '还没拉过列表。点刷新会向 Cursor 要当前账号下的 Agent。',
+                  style: Theme.of(context).textTheme.bodySmall,
+                )
+              else
+                for (final agent in store.cloudAgents)
+                  ListTile(
+                    key: Key('cloud-agent-${agent.id}'),
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      agent.name?.trim().isNotEmpty == true
+                          ? agent.name!
+                          : agent.id,
+                    ),
+                    subtitle: Text(
+                      [
+                        agent.id,
+                        if (agent.status != null) agent.status,
+                        if (agent.id == store.quickAgentId) '快速对话',
+                      ].join(' · '),
+                    ),
+                    trailing: IconButton(
+                      tooltip: '删除云端 Agent',
+                      onPressed: () =>
+                          unawaited(store.deleteCloudAgent(agent.id)),
+                      icon: const Icon(Icons.delete_outline),
+                    ),
+                  ),
               const SizedBox(height: 32),
               Text('语音输入', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),

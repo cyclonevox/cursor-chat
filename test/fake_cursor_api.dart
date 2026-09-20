@@ -9,6 +9,9 @@ class FakeCursorApi extends CursorApi {
   final Map<String, Completer<String>> streams = {};
   final Map<String, String> _results = {};
   final List<String> createdPrompts = [];
+  final List<String> cancelledRuns = [];
+  final List<String> deletedAgents = [];
+  List<AgentInfo> listedAgents = const [];
   Object? nextCreateError;
   Object? nextStreamError;
   Object? nextWaitError;
@@ -108,19 +111,44 @@ class FakeCursorApi extends CursorApi {
   }
 
   @override
+  Future<void> cancelRun(String agentId, String runId) async {
+    cancelledRuns.add(runId);
+    final c = streams[runId];
+    if (c != null && !c.isCompleted) {
+      c.completeError(RunFailedException('CANCELLED'));
+    }
+  }
+
+  @override
+  Future<List<AgentInfo>> listAgents({int limit = 100}) async => listedAgents;
+
+  @override
+  Future<void> deleteAgent(String agentId) async {
+    deletedAgents.add(agentId);
+    listedAgents = [for (final a in listedAgents) if (a.id != agentId) a];
+  }
+
+  @override
   Future<String> streamRun({
     required String agentId,
     required String runId,
     required void Function(String delta) onDelta,
     void Function(String status)? onStatus,
     void Function(String delta)? onThinking,
+    CancelToken? cancelToken,
   }) async {
     if (nextStreamError != null) {
       final e = nextStreamError!;
       nextStreamError = null;
       throw e;
     }
+    if (cancelToken?.isCancelled == true) {
+      throw RunFailedException('CANCELLED');
+    }
     final c = _openStream(runId);
+    cancelToken?.onCancel = () {
+      if (!c.isCompleted) c.completeError(RunFailedException('CANCELLED'));
+    };
     final text = await c.future;
     if (text.isNotEmpty) onDelta(text);
     return text;

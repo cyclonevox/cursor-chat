@@ -100,6 +100,137 @@ void main() {
     expect(find.textContaining('stream_unavailable'), findsNothing);
   });
 
+  testWidgets('drawer groups topics under 快速对话 and agents separately', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = ChatStore();
+    store.conversations
+      ..clear()
+      ..addAll([
+        Conversation(
+          id: 'q',
+          title: '快速对话',
+          kind: ConversationKind.quick,
+          titleFrozen: true,
+        ),
+        Conversation(
+          id: 't-weather',
+          title: '今天热不热',
+          kind: ConversationKind.topic,
+        ),
+        Conversation(id: 't-math', title: '1+1', kind: ConversationKind.topic),
+        Conversation(
+          id: 'iso',
+          title: '写个 PR',
+          kind: ConversationKind.isolated,
+        ),
+      ]);
+    store.activeId = 't-weather';
+
+    await tester.pumpWidget(ChatApp(store: store));
+    tester.state<ScaffoldState>(find.byType(Scaffold).first).openDrawer();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final drawer = find.byType(Drawer);
+    final quickHeader = tester.getTopLeft(
+      find.descendant(of: drawer, matching: find.text('快速对话')),
+    );
+    final topic = tester.getTopLeft(
+      find.descendant(of: drawer, matching: find.text('今天热不热')),
+    );
+    final agentHeader = tester.getTopLeft(
+      find.descendant(of: drawer, matching: find.text('独立 Agent')),
+    );
+    final isolated = tester.getTopLeft(
+      find.descendant(of: drawer, matching: find.text('写个 PR')),
+    );
+    expect(
+      find.descendant(of: drawer, matching: find.byTooltip('新对话')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: drawer, matching: find.byTooltip('新开 Agent')),
+      findsOneWidget,
+    );
+    expect(find.byTooltip('折叠快速对话'), findsOneWidget);
+    expect(find.byTooltip('折叠独立 Agent'), findsOneWidget);
+    expect(quickHeader.dy, lessThan(topic.dy));
+    expect(topic.dy, lessThan(agentHeader.dy));
+    expect(agentHeader.dy, lessThan(isolated.dy));
+    expect(topic.dx, greaterThan(isolated.dx));
+
+    await tester.tap(find.byTooltip('折叠快速对话'));
+    await tester.pump();
+    expect(
+      find.descendant(of: drawer, matching: find.text('今天热不热')),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: drawer, matching: find.text('写个 PR')),
+      findsOneWidget,
+    );
+
+    await tester.tap(
+      find.descendant(of: drawer, matching: find.byTooltip('新对话')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(store.active?.kind, ConversationKind.topic);
+    expect(store.active?.title, '新对话');
+  });
+
+  testWidgets('app bar new action follows the current mode', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final store = ChatStore();
+    store.conversations
+      ..clear()
+      ..addAll([
+        Conversation(
+          id: 'q',
+          title: '快速对话',
+          kind: ConversationKind.quick,
+          titleFrozen: true,
+        ),
+        Conversation(id: 't1', title: '今天热不热', kind: ConversationKind.topic),
+        Conversation(
+          id: 'iso',
+          title: '写个 PR',
+          kind: ConversationKind.isolated,
+        ),
+      ]);
+    store.activeId = 't1';
+
+    await tester.pumpWidget(ChatApp(store: store));
+    expect(find.byTooltip('新对话'), findsOneWidget);
+    expect(find.byTooltip('新开 Agent'), findsNothing);
+    expect(find.text('快速对话'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('appbar-new')));
+    await tester.pump();
+    expect(store.active?.kind, ConversationKind.topic);
+    expect(store.topicChats, hasLength(2));
+
+    tester.state<ScaffoldState>(find.byType(Scaffold).first).openDrawer();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(
+      find.descendant(of: find.byType(Drawer), matching: find.text('写个 PR')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byTooltip('新开 Agent'), findsOneWidget);
+    expect(find.textContaining('独立 Agent'), findsWidgets);
+
+    await tester.tap(find.byKey(const Key('appbar-new')));
+    await tester.pump();
+    expect(store.active?.kind, ConversationKind.isolated);
+    expect(store.active?.title, '新 Agent');
+    expect(store.isolatedChats, hasLength(2));
+  });
+
   testWidgets('opening a chat lands on the latest user message', (
     tester,
   ) async {

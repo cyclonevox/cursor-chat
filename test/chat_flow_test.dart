@@ -100,6 +100,24 @@ void main() {
     expect(looksLikeQuestion(a.title), isFalse);
   });
 
+  test('topic prompt tags the thread so the model can separate chats', () {
+    final prompt = topicBoundaryPrompt(
+      topicId: 't1',
+      title: '天气',
+      messages: [
+        ChatMessage(id: 'u1', role: 'user', text: '今天热不热'),
+        ChatMessage(id: 'a1', role: 'assistant', text: '有点热。'),
+        ChatMessage(id: 'u2', role: 'user', text: '那穿什么'),
+      ],
+      question: '那穿什么',
+      firstInTopic: false,
+    );
+    expect(prompt, contains('[话题 t1｜天气]'));
+    expect(prompt, contains('独立话题'));
+    expect(prompt, contains('今天热不热'));
+    expect(prompt, contains('用户：那穿什么'));
+  });
+
   test('continuity prompt keeps prior Q&A and drops error bubbles', () {
     final prompt = conversationContinuityPrompt([
       ChatMessage(id: 'u1', role: 'user', text: '你这个可微里的 r 怎么来的？'),
@@ -113,7 +131,7 @@ void main() {
     expect(prompt.contains('运行结束'), isFalse);
   });
 
-  test('same chat ignores a second send while loading', () async {
+  test('same chat queues a second send while loading', () async {
     final api = FakeCursorApi();
     final store = ChatStore(client: api);
     store.apiKey = 'k';
@@ -124,12 +142,110 @@ void main() {
 
     final first = store.send(text: '牛顿第一定律是什么');
     await _until(() => api.createdPrompts.length == 1);
-    await store.send(text: '第二句不该发出去');
+    await store.send(text: '第二句先排队');
     expect(api.createdPrompts, hasLength(1));
-    expect(store.active!.messages.where((m) => m.role == 'user'), hasLength(1));
+    expect(store.active!.messages.where((m) => m.role == 'user'), hasLength(2));
+    expect(store.active!.messages.where((m) => m.queued), hasLength(1));
 
     api.finish('run-1', '牛顿第一定律是指惯性定律。');
     await first;
+    await _until(() => api.createdPrompts.length == 2);
+    expect(store.active!.messages.where((m) => m.queued), isEmpty);
+    api.finish(store.active!.pendingRunId!, '这是排队后的第二句。');
+    await _until(() => !store.isSending('a'));
+    expect(store.active!.messages.last.text, contains('排队后'));
+  });
+
+  test('cancel stops the current run', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations
+      ..clear()
+      ..add(Conversation(id: 'a', title: '对话A'));
+    store.activeId = 'a';
+
+    final first = store.send(text: '牛顿第一定律是什么');
+    await _until(() => store.active!.pendingRunId != null);
+    await store.cancelGeneration();
+    await first;
+    expect(api.cancelledRuns, isNotEmpty);
+    expect(store.active!.messages.last.text, contains('取消'));
+    expect(store.isSending('a'), isFalse);
+  });
+
+  test(
+    'new topic reuses the quick agent instead of creating another',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.conversations.clear();
+      store.newChat();
+      expect(store.quickChat, isNotNull);
+
+      final first = store.send(text: '今天天气怎么样');
+      await _until(() => store.active!.pendingRunId != null);
+      final agent = store.quickAgentId;
+      expect(agent, isNotNull);
+      expect(api.createdPrompts, hasLength(1));
+      expect(api.createdPrompts.last, contains('[话题'));
+      api.finish(store.active!.pendingRunId!, '今天不错。');
+      await first;
+
+      store.newChat();
+      expect(store.active!.kind, ConversationKind.topic);
+      final second = store.send(text: '换个话题，1+1等于几');
+      await _until(() => store.active!.pendingRunId != null);
+      expect(store.quickAgentId, agent);
+      expect(store.active!.agentId, agent);
+      expect(api.createdPrompts, hasLength(2));
+      expect(api.createdPrompts.last, contains('[话题'));
+      expect(api.createdPrompts.last, contains('1+1等于几'));
+      api.finish(store.active!.pendingRunId!, '2');
+      await second;
+    },
+  );
+
+  test('newAgentChat still creates a separate cloud agent', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations.clear();
+    store.newChat();
+    final daily = store.send(text: '日常一句');
+    await _until(() => store.active!.pendingRunId != null);
+    final quick = store.quickAgentId;
+    api.finish(store.active!.pendingRunId!, '收到');
+    await daily;
+
+    store.newAgentChat();
+    expect(store.active!.kind, ConversationKind.isolated);
+    final isolated = store.send(text: '这是隔离对话');
+    await _until(() => store.active!.pendingRunId != null);
+    expect(store.active!.agentId, isNot(quick));
+    api.finish(store.active!.pendingRunId!, '隔离答复');
+    await isolated;
+  });
+
+  test('deleting an isolated chat deletes the cloud agent', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations
+      ..clear()
+      ..add(
+        Conversation(
+          id: 'iso',
+          title: '隔离',
+          kind: ConversationKind.isolated,
+          agentId: 'bc-gone',
+        ),
+      );
+    store.activeId = 'iso';
+    await store.deleteChat('iso');
+    expect(api.deletedAgents, contains('bc-gone'));
+    expect(store.quickChat, isNotNull);
   });
 
   testWidgets('typing in B works while A is still loading', (tester) async {
@@ -159,7 +275,8 @@ void main() {
 
     expect(
       tester.widget<TextField>(find.byKey(const Key('composer-input'))).enabled,
-      isFalse,
+      isTrue,
+      reason: '回复中仍要能输入，方便排队',
     );
 
     await _openDrawer(tester);
@@ -228,7 +345,7 @@ void main() {
     expect(store.activeId, 'a');
     expect(
       tester.widget<TextField>(find.byKey(const Key('composer-input'))).enabled,
-      isFalse,
+      isTrue,
     );
 
     api.finish(runA, '通分是为了把分母对齐。');
@@ -267,8 +384,10 @@ void main() {
     );
     await tester.pump();
 
+    await _openDrawer(tester);
     await tester.tap(find.byTooltip('新对话'));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     expect(store.activeId, isNot('a'));
     expect(
       tester.widget<TextField>(find.byKey(const Key('composer-input'))).enabled,
@@ -289,6 +408,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     await _openDrawer(tester);
+    final beforeDelete = store.conversations.length;
     await tester.tap(
       find
           .descendant(
@@ -298,7 +418,7 @@ void main() {
           .first,
     );
     await tester.pump();
-    expect(store.conversations.length, 2);
+    expect(store.conversations.length, beforeDelete - 1);
     expect(store.isSending('a'), isTrue);
 
     api.finishAll();
@@ -374,11 +494,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('运行结束：ERROR'), findsNothing);
-    expect(
-      tester.widget<TextField>(find.byKey(const Key('composer-input'))).enabled,
-      isFalse,
-      reason: '回退到新 agent 时仍应显示载入中',
-    );
+    expect(find.byKey(const Key('composer-stop')), findsOneWidget);
 
     api.finish(store.active!.pendingRunId!, '可微就是看误差除以 r 是否趋于 0。');
     await tester.pump();
@@ -393,40 +509,34 @@ void main() {
     );
   });
 
-  test(
-    'follow-up network drop dumps local session into a new agent',
-    () async {
-      final api = FakeCursorApi();
-      final store = ChatStore(client: api);
-      store.apiKey = 'k';
-      store.conversations
-        ..clear()
-        ..add(Conversation(id: 'a', title: '可微证明', titleFrozen: true));
-      store.activeId = 'a';
+  test('follow-up network drop dumps local session into a new agent', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations
+      ..clear()
+      ..add(Conversation(id: 'a', title: '可微证明', titleFrozen: true));
+    store.activeId = 'a';
 
-      final first = store.send(text: '你这个可微里的 r 怎么来的？');
-      await _until(() => store.active!.pendingRunId != null);
-      api.finish(store.active!.pendingRunId!, '把 (x,y) 换成极坐标，r 就是到原点的距离。');
-      await first;
+    final first = store.send(text: '你这个可微里的 r 怎么来的？');
+    await _until(() => store.active!.pendingRunId != null);
+    api.finish(store.active!.pendingRunId!, '把 (x,y) 换成极坐标，r 就是到原点的距离。');
+    await first;
 
-      api.failRuns = true;
-      final follow = store.send(text: '你这个和答案写的不一样啊');
-      await _until(() => api.createdPrompts.length >= 2);
-      expect(api.createdPrompts.last, contains('这是同一段对话的后续'));
-      expect(api.createdPrompts.last, contains('你这个和答案写的不一样啊'));
-      expect(api.createdPrompts.last, contains('极坐标'));
+    api.failRuns = true;
+    final follow = store.send(text: '你这个和答案写的不一样啊');
+    await _until(() => api.createdPrompts.length >= 2);
+    expect(api.createdPrompts.last, contains('这是同一段对话的后续'));
+    expect(api.createdPrompts.last, contains('你这个和答案写的不一样啊'));
+    expect(api.createdPrompts.last, contains('极坐标'));
 
-      api.failRuns = false;
-      final replayRun = store.active!.pendingRunId!;
-      api.finish(replayRun, '按书上的写法，先写定义再估计余项。');
-      await follow;
-      expect(store.active!.messages.last.text, contains('按书上的写法'));
-      expect(
-        store.active!.messages.where((m) => m.role == 'user'),
-        hasLength(2),
-      );
-    },
-  );
+    api.failRuns = false;
+    final replayRun = store.active!.pendingRunId!;
+    api.finish(replayRun, '按书上的写法，先写定义再估计余项。');
+    await follow;
+    expect(store.active!.messages.last.text, contains('按书上的写法'));
+    expect(store.active!.messages.where((m) => m.role == 'user'), hasLength(2));
+  });
 
   test('network drop keeps run id; retryLast pulls the reply back', () async {
     final api = FakeCursorApi();
@@ -455,27 +565,30 @@ void main() {
     expect(store.canRetryLast, isFalse);
   });
 
-  test('resumeInFlight recovers a failed bubble that still has a run id', () async {
-    final api = FakeCursorApi();
-    final store = ChatStore(client: api);
-    store.apiKey = 'k';
-    store.conversations
-      ..clear()
-      ..add(Conversation(id: 'a', title: '对话A'));
-    store.activeId = 'a';
+  test(
+    'resumeInFlight recovers a failed bubble that still has a run id',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.conversations
+        ..clear()
+        ..add(Conversation(id: 'a', title: '对话A'));
+      store.activeId = 'a';
 
-    api.nextStreamError = CursorApiException(0, 'Connection reset');
-    api.nextWaitError = CursorApiException(0, 'Connection reset');
-    await store.send(text: '什么是哈希碰撞');
-    expect(store.active!.messages.last.streaming, isFalse);
-    final runId = store.active!.pendingRunId!;
+      api.nextStreamError = CursorApiException(0, 'Connection reset');
+      api.nextWaitError = CursorApiException(0, 'Connection reset');
+      await store.send(text: '什么是哈希碰撞');
+      expect(store.active!.messages.last.streaming, isFalse);
+      final runId = store.active!.pendingRunId!;
 
-    final resumed = store.resumeInFlight();
-    await _until(() => store.isSending('a'));
-    api.finish(runId, '不同输入映射到同一哈希值。');
-    await resumed;
-    expect(store.active!.messages.last.text, contains('不同输入映射'));
-  });
+      final resumed = store.resumeInFlight();
+      await _until(() => store.isSending('a'));
+      api.finish(runId, '不同输入映射到同一哈希值。');
+      await resumed;
+      expect(store.active!.messages.last.text, contains('不同输入映射'));
+    },
+  );
 
   testWidgets('failed reply shows resend and retries without duplicating', (
     tester,

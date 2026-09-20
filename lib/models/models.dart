@@ -34,6 +34,20 @@ class PromptImage {
   }
 }
 
+enum ConversationKind {
+  quick,
+  topic,
+  isolated;
+
+  static ConversationKind parse(String? raw) {
+    return switch (raw) {
+      'quick' => ConversationKind.quick,
+      'topic' => ConversationKind.topic,
+      _ => ConversationKind.isolated,
+    };
+  }
+}
+
 class ChatMessage {
   ChatMessage({
     required this.id,
@@ -41,6 +55,8 @@ class ChatMessage {
     required this.text,
     this.imagePaths = const [],
     this.streaming = false,
+    this.queued = false,
+    this.rush = false,
     this.thinking = '',
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
@@ -50,6 +66,8 @@ class ChatMessage {
   String text;
   final List<String> imagePaths;
   bool streaming;
+  bool queued;
+  bool rush;
   String thinking;
   final DateTime createdAt;
 
@@ -60,6 +78,8 @@ class ChatMessage {
     'imagePaths': imagePaths,
     'thinking': thinking,
     'streaming': streaming,
+    'queued': queued,
+    'rush': rush,
     'createdAt': createdAt.toIso8601String(),
   };
 
@@ -69,6 +89,8 @@ class ChatMessage {
     text: json['text'] as String? ?? '',
     thinking: json['thinking'] as String? ?? '',
     streaming: json['streaming'] == true,
+    queued: json['queued'] == true,
+    rush: json['rush'] == true,
     imagePaths: [
       for (final p in json['imagePaths'] as List? ?? const []) p as String,
     ],
@@ -81,6 +103,8 @@ class Conversation {
   Conversation({
     required this.id,
     required this.title,
+    this.kind = ConversationKind.isolated,
+    this.topicId,
     this.agentId,
     this.pendingRunId,
     this.titleFrozen = false,
@@ -91,15 +115,22 @@ class Conversation {
 
   final String id;
   String title;
+  ConversationKind kind;
+  String? topicId;
   bool titleFrozen;
   String? agentId;
   String? pendingRunId;
   final List<ChatMessage> messages;
   DateTime updatedAt;
 
+  bool get sharesQuickAgent =>
+      kind == ConversationKind.quick || kind == ConversationKind.topic;
+
   Map<String, dynamic> toJson() => {
     'id': id,
     'title': title,
+    'kind': kind.name,
+    'topicId': topicId,
     'titleFrozen': titleFrozen,
     'agentId': agentId,
     'pendingRunId': pendingRunId,
@@ -112,6 +143,8 @@ class Conversation {
     return Conversation(
       id: json['id'] as String,
       title: title,
+      kind: ConversationKind.parse(json['kind'] as String?),
+      topicId: json['topicId'] as String?,
       titleFrozen: json['titleFrozen'] as bool? ?? title != '新对话',
       agentId: json['agentId'] as String?,
       pendingRunId: json['pendingRunId'] as String?,
@@ -178,7 +211,7 @@ bool isFailedAssistantText(String text) {
   final t = text.trim();
   if (t.isEmpty) return false;
   if (t.startsWith('出错了：') || t.startsWith('运行结束：')) return true;
-  if (t == '（没有文字回复）') return true;
+  if (t == '（没有文字回复）' || t == '这次回复被取消了。') return true;
   return false;
 }
 

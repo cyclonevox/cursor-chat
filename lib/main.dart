@@ -86,6 +86,17 @@ class _ChatAppState extends State<ChatApp> with WidgetsBindingObserver {
   }
 }
 
+String _modeLabel(Conversation? conv) =>
+    conv?.kind == ConversationKind.isolated ? '独立 Agent' : '快速对话';
+
+String? _appBarModeLine(Conversation? conv, ChatStore store) {
+  final mode = _modeLabel(conv);
+  final model = store.models.isNotEmpty ? store.modelSummary : null;
+  if (conv?.title == mode) return model;
+  if (model == null) return mode;
+  return '$mode · $model';
+}
+
 class ChatHome extends StatelessWidget {
   const ChatHome({super.key, required this.store});
 
@@ -98,6 +109,7 @@ class ChatHome extends StatelessWidget {
       builder: (context, _) {
         final conv = store.active;
         final scheme = Theme.of(context).colorScheme;
+        final modeLine = _appBarModeLine(conv, store);
         return AnnotatedRegion<SystemUiOverlayStyle>(
           value: overlayFor(Theme.of(context).brightness),
           child: Scaffold(
@@ -110,9 +122,9 @@ class ChatHome extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(conv?.title ?? 'Cursor Chat'),
-                  if (store.models.isNotEmpty)
+                  if (modeLine != null)
                     Text(
-                      store.modelSummary,
+                      modeLine,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.labelSmall?.copyWith(
@@ -122,11 +134,20 @@ class ChatHome extends StatelessWidget {
                 ],
               ),
               actions: [
-                IconButton(
-                  tooltip: '新对话',
-                  onPressed: store.newChat,
-                  icon: const Icon(Icons.edit_square),
-                ),
+                if (conv?.kind == ConversationKind.isolated)
+                  IconButton(
+                    key: const Key('appbar-new'),
+                    tooltip: '新开 Agent',
+                    onPressed: store.newAgentChat,
+                    icon: const Icon(Icons.cloud_outlined),
+                  )
+                else
+                  IconButton(
+                    key: const Key('appbar-new'),
+                    tooltip: '新对话',
+                    onPressed: store.newChat,
+                    icon: const Icon(Icons.edit_square),
+                  ),
                 IconButton(
                   tooltip: '设置',
                   onPressed: () {
@@ -242,10 +263,52 @@ class ChatHome extends StatelessWidget {
   }
 }
 
-class ConversationDrawer extends StatelessWidget {
+Future<void> _confirmDeleteChat(
+  BuildContext context,
+  ChatStore store,
+  Conversation conv,
+) async {
+  if (conv.kind == ConversationKind.isolated &&
+      conv.agentId != null &&
+      conv.agentId!.isNotEmpty) {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除对话'),
+        content: const Text('也会删除云端的这只 Agent，不能恢复。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+  }
+  await store.deleteChat(conv.id);
+}
+
+class ConversationDrawer extends StatefulWidget {
   const ConversationDrawer({super.key, required this.store});
 
   final ChatStore store;
+
+  @override
+  State<ConversationDrawer> createState() => _ConversationDrawerState();
+}
+
+class _ConversationDrawerState extends State<ConversationDrawer> {
+  bool _topicsExpanded = true;
+  bool _agentsExpanded = true;
+
+  ChatStore get store => widget.store;
+
+  void _close() => Navigator.pop(context);
 
   @override
   Widget build(BuildContext context) {
@@ -269,53 +332,190 @@ class ConversationDrawer extends StatelessWidget {
                     style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-                ListTile(
-                  leading: const Icon(Icons.edit_square),
-                  title: const Text('新对话'),
-                  onTap: () {
-                    store.newChat();
-                    Navigator.pop(context);
-                  },
-                ),
                 Divider(
                   height: 1,
                   color: scheme.outline.withValues(alpha: 0.3),
                 ),
                 Expanded(
-                  child: ListView.builder(
-                    itemCount: store.conversations.length,
-                    itemBuilder: (context, i) {
-                      final c = store.conversations[i];
-                      final selected = c.id == store.active?.id;
-                      return ListTile(
-                        selected: selected,
-                        selectedTileColor: scheme.primary.withValues(
-                          alpha: 0.14,
-                        ),
-                        title: Text(
-                          c.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                        subtitle: store.isSending(c.id)
-                            ? const Text('回复中…')
-                            : null,
-                        onTap: () {
-                          store.selectChat(c.id);
-                          Navigator.pop(context);
+                  child: ListView(
+                    children: [
+                      _DrawerSection(
+                        title: '快速对话',
+                        expanded: _topicsExpanded,
+                        selected: store.active?.sharesQuickAgent == true,
+                        addTooltip: '新对话',
+                        addKey: const Key('drawer-add-topic'),
+                        toggleKey: const Key('drawer-toggle-topics'),
+                        onToggle: () =>
+                            setState(() => _topicsExpanded = !_topicsExpanded),
+                        onAdd: () {
+                          setState(() => _topicsExpanded = true);
+                          store.newChat();
+                          _close();
                         },
-                        trailing: IconButton(
-                          icon: const Icon(Icons.delete_outline),
-                          onPressed: () => store.deleteChat(c.id),
-                        ),
-                      );
-                    },
+                        onTitleTap: () {
+                          final quick = store.quickChat;
+                          if (quick == null) return;
+                          store.selectChat(quick.id);
+                          _close();
+                        },
+                      ),
+                      if (_topicsExpanded) ...[
+                        for (final c in store.topicChats)
+                          _DrawerChatTile(
+                            store: store,
+                            conversation: c,
+                            indented: true,
+                          ),
+                        if (store.topicChats.isEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(48, 4, 16, 12),
+                            child: Text(
+                              '点 + 开一个话题。',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                      ],
+                      _DrawerSection(
+                        title: '独立 Agent',
+                        expanded: _agentsExpanded,
+                        selected:
+                            store.active?.kind == ConversationKind.isolated,
+                        addTooltip: '新开 Agent',
+                        addKey: const Key('drawer-add-agent'),
+                        toggleKey: const Key('drawer-toggle-agents'),
+                        onToggle: () =>
+                            setState(() => _agentsExpanded = !_agentsExpanded),
+                        onAdd: () {
+                          setState(() => _agentsExpanded = true);
+                          store.newAgentChat();
+                          _close();
+                        },
+                      ),
+                      if (_agentsExpanded) ...[
+                        for (final c in store.isolatedChats)
+                          _DrawerChatTile(store: store, conversation: c),
+                        if (store.isolatedChats.isEmpty)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 4, 16, 12),
+                            child: Text(
+                              '点 + 单独建一只 Agent。',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                      ],
+                    ],
                   ),
                 ),
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _DrawerSection extends StatelessWidget {
+  const _DrawerSection({
+    required this.title,
+    required this.expanded,
+    required this.onToggle,
+    required this.onAdd,
+    required this.addTooltip,
+    this.selected = false,
+    this.onTitleTap,
+    this.addKey,
+    this.toggleKey,
+  });
+
+  final String title;
+  final bool expanded;
+  final bool selected;
+  final VoidCallback onToggle;
+  final VoidCallback onAdd;
+  final String addTooltip;
+  final VoidCallback? onTitleTap;
+  final Key? addKey;
+  final Key? toggleKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final labelStyle = Theme.of(
+      context,
+    ).textTheme.titleSmall?.copyWith(color: scheme.onSurfaceVariant);
+    return Material(
+      color: selected
+          ? scheme.primary.withValues(alpha: 0.14)
+          : Colors.transparent,
+      child: SizedBox(
+        height: 48,
+        child: Row(
+          children: [
+            IconButton(
+              key: toggleKey,
+              tooltip: expanded ? '折叠$title' : '展开$title',
+              visualDensity: VisualDensity.compact,
+              onPressed: onToggle,
+              icon: Icon(expanded ? Icons.expand_more : Icons.chevron_right),
+            ),
+            Expanded(
+              child: InkWell(
+                onTap: onTitleTap ?? onToggle,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(title, style: labelStyle),
+                ),
+              ),
+            ),
+            IconButton(
+              key: addKey,
+              tooltip: addTooltip,
+              visualDensity: VisualDensity.compact,
+              onPressed: onAdd,
+              icon: const Icon(Icons.add),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DrawerChatTile extends StatelessWidget {
+  const _DrawerChatTile({
+    required this.store,
+    required this.conversation,
+    this.indented = false,
+  });
+
+  final ChatStore store;
+  final Conversation conversation;
+  final bool indented;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final c = conversation;
+    final subtitle = store.isSending(c.id)
+        ? '回复中…'
+        : store.isQueued(c.id)
+        ? '排队中'
+        : null;
+    return ListTile(
+      contentPadding: EdgeInsets.only(left: indented ? 48 : 16, right: 8),
+      selected: c.id == store.active?.id,
+      selectedTileColor: scheme.primary.withValues(alpha: 0.14),
+      title: Text(c.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle == null ? null : Text(subtitle),
+      onTap: () {
+        store.selectChat(c.id);
+        Navigator.pop(context);
+      },
+      trailing: IconButton(
+        icon: const Icon(Icons.delete_outline),
+        onPressed: () => _confirmDeleteChat(context, store, c),
       ),
     );
   }
@@ -332,20 +532,52 @@ class _MessageList extends StatefulWidget {
 
 class _MessageListState extends State<_MessageList> {
   final _scroll = ScrollController();
-  final _latestUserKey = GlobalKey();
-  String? _revealedFor;
+  String? _boundConvId;
+  bool _pinnedToLatest = true;
+  String? _followedFor;
 
   ChatStore get store => widget.store;
 
   @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  @override
   void dispose() {
+    _scroll.removeListener(_onScroll);
     _scroll.dispose();
     super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final pinned = _scroll.position.pixels <= 48;
+    if (pinned == _pinnedToLatest) return;
+    setState(() => _pinnedToLatest = pinned);
+  }
+
+  void _bindConversation(String? id) {
+    if (id == _boundConvId) return;
+    _boundConvId = id;
+    _pinnedToLatest = true;
+    _followedFor = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _jumpToLatest();
+    });
+  }
+
+  void _jumpToLatest() {
+    if (!_scroll.hasClients) return;
+    _scroll.jumpTo(0);
+    if (!_pinnedToLatest) setState(() => _pinnedToLatest = true);
   }
 
   @override
   Widget build(BuildContext context) {
     final conv = store.active;
+    _bindConversation(conv?.id);
     final messages = conv?.messages ?? const <ChatMessage>[];
     if (messages.isEmpty) {
       return Center(
@@ -363,65 +595,51 @@ class _MessageListState extends State<_MessageList> {
       );
     }
     final topPad = MediaQuery.paddingOf(context).top + kToolbarHeight + 12;
-    final userIndex = messages.lastIndexWhere((m) => m.role == 'user');
-    final anchorIndex = userIndex >= 0 ? userIndex : messages.length - 1;
-    final token = '${conv!.id}:${messages[anchorIndex].id}';
-    if (token != _revealedFor) {
+    final last = messages.last;
+    final token =
+        '${conv!.id}:${last.id}:${last.text.length}:${last.streaming}';
+    if (_pinnedToLatest && token != _followedFor) {
+      _followedFor = token;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _revealLatestUser(token);
+        if (mounted && _pinnedToLatest) _jumpToLatest();
       });
     }
-    // reverse:true pins the newest bubble to the visual bottom. Vertical
-    // padding is swapped along the scroll axis, so composer space goes in
-    // [top] and the app-bar inset goes in [bottom].
-    return SelectionArea(
-      child: ListView.builder(
-        key: ValueKey(conv.id),
-        controller: _scroll,
-        reverse: true,
-        padding: EdgeInsets.fromLTRB(16, 132, 16, topPad),
-        itemCount: messages.length,
-        itemBuilder: (context, i) {
-          final index = messages.length - 1 - i;
-          final message = messages[index];
-          return _Bubble(
-            key: index == anchorIndex ? _latestUserKey : ValueKey(message.id),
-            message: message,
-            store: store,
-            showRetry:
-                index == messages.length - 1 &&
-                message.role == 'assistant' &&
-                store.canRetryLast,
-          );
-        },
-      ),
+    return Stack(
+      children: [
+        SelectionArea(
+          child: ListView.builder(
+            key: ValueKey(conv.id),
+            controller: _scroll,
+            reverse: true,
+            padding: EdgeInsets.fromLTRB(16, 132, 16, topPad),
+            itemCount: messages.length,
+            itemBuilder: (context, i) {
+              final index = messages.length - 1 - i;
+              final message = messages[index];
+              return _Bubble(
+                key: ValueKey(message.id),
+                message: message,
+                store: store,
+                showRetry:
+                    index == messages.length - 1 &&
+                    message.role == 'assistant' &&
+                    store.canRetryLast,
+              );
+            },
+          ),
+        ),
+        if (!_pinnedToLatest)
+          Positioned(
+            right: 16,
+            bottom: 148,
+            child: FilledButton.tonal(
+              key: const Key('scroll-to-latest'),
+              onPressed: _jumpToLatest,
+              child: const Text('回到最新'),
+            ),
+          ),
+      ],
     );
-  }
-
-  void _revealLatestUser(String token, [int attempt = 0]) {
-    if (!mounted || _revealedFor == token) return;
-    final ctx = _latestUserKey.currentContext;
-    if (ctx == null) {
-      if (attempt >= 12 || !_scroll.hasClients) return;
-      final pos = _scroll.position;
-      final next = (pos.pixels + pos.viewportDimension * 0.9).clamp(
-        0.0,
-        pos.maxScrollExtent,
-      );
-      if (next > pos.pixels + 1) _scroll.jumpTo(next);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _revealLatestUser(token, attempt + 1);
-      });
-      return;
-    }
-    final box = ctx.findRenderObject() as RenderBox?;
-    if (box == null || !box.hasSize) return;
-    final top = box.localToGlobal(Offset.zero).dy;
-    final minY = MediaQuery.paddingOf(ctx).top + kToolbarHeight;
-    if (top < minY - 8) {
-      Scrollable.ensureVisible(ctx, alignment: 0.0, duration: Duration.zero);
-    }
-    _revealedFor = token;
   }
 }
 
@@ -502,9 +720,34 @@ class _Bubble extends StatelessWidget {
                       thinking: message.thinking,
                       streaming: message.streaming && message.text.isEmpty,
                     ),
-                  if (isUser)
-                    SelectableText(message.text)
-                  else if (message.streaming && message.text.isEmpty)
+                  if (isUser) ...[
+                    SelectableText(message.text),
+                    if (message.queued)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '排队中',
+                              style: Theme.of(context).textTheme.labelSmall
+                                  ?.copyWith(
+                                    color: scheme.onPrimaryContainer.withValues(
+                                      alpha: 0.72,
+                                    ),
+                                  ),
+                            ),
+                            IconButton(
+                              key: Key('dequeue-${message.id}'),
+                              tooltip: '取消排队',
+                              visualDensity: VisualDensity.compact,
+                              onPressed: () => store.removeQueued(message.id),
+                              icon: const Icon(Icons.close, size: 16),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ] else if (message.streaming && message.text.isEmpty)
                     const Padding(
                       padding: EdgeInsets.only(top: 4),
                       child: SizedBox(
@@ -840,7 +1083,7 @@ class _ComposerState extends State<Composer> {
   }
 
   Future<void> _startVoice() async {
-    if (_listening || _transcribing || widget.store.sending) return;
+    if (_listening || _transcribing) return;
     if (!widget.store.voiceMicReady) return;
     _hideKeyboard();
     _voiceAnchor = _controller.text;
@@ -1001,13 +1244,13 @@ class _ComposerState extends State<Composer> {
     setState(() => _images[index] = img);
   }
 
-  Future<void> _send() async {
+  Future<void> _send({bool insertNow = false}) async {
     final text = _controller.text;
     final images = List<PromptImage>.from(_images);
     if (text.trim().isEmpty && images.isEmpty) return;
     _controller.clear();
     setState(() => _images.clear());
-    await widget.store.send(text: text, images: images);
+    await widget.store.send(text: text, images: images, insertNow: insertNow);
   }
 
   @override
@@ -1076,7 +1319,7 @@ class _ComposerState extends State<Composer> {
                   children: [
                     IconButton(
                       tooltip: '相册',
-                      onPressed: busy || _listening || _transcribing
+                      onPressed: _listening || _transcribing
                           ? null
                           : () {
                               if (Platform.isLinux) {
@@ -1090,9 +1333,7 @@ class _ComposerState extends State<Composer> {
                     if (!Platform.isLinux && !_listening && !_transcribing)
                       IconButton(
                         tooltip: '拍照',
-                        onPressed: busy
-                            ? null
-                            : () => _addFromPicker(ImageSource.camera),
+                        onPressed: () => _addFromPicker(ImageSource.camera),
                         icon: const Icon(Icons.photo_camera_outlined),
                       ),
                     Expanded(
@@ -1110,7 +1351,7 @@ class _ComposerState extends State<Composer> {
                                 minLines: 1,
                                 maxLines: _listening || _transcribing ? 1 : 6,
                                 textInputAction: TextInputAction.newline,
-                                enabled: !busy && !_listening && !_transcribing,
+                                enabled: !_listening && !_transcribing,
                                 decoration: const InputDecoration(
                                   hintText: '问点什么…',
                                   border: InputBorder.none,
@@ -1123,9 +1364,7 @@ class _ComposerState extends State<Composer> {
                                     vertical: 10,
                                   ),
                                 ),
-                                onSubmitted: (_) {
-                                  if (!busy) _send();
-                                },
+                                onSubmitted: (_) => _send(),
                               ),
                             ),
                           ),
@@ -1145,13 +1384,13 @@ class _ComposerState extends State<Composer> {
                       IconButton(
                         key: const Key('composer-voice-cancel'),
                         tooltip: '取消',
-                        onPressed: busy || _transcribing ? null : _cancelVoice,
+                        onPressed: _transcribing ? null : _cancelVoice,
                         icon: const Icon(Icons.close),
                       ),
                       IconButton.filledTonal(
                         key: const Key('composer-voice-confirm'),
                         tooltip: '完成',
-                        onPressed: busy || _transcribing ? null : _confirmVoice,
+                        onPressed: _transcribing ? null : _confirmVoice,
                         icon: _transcribing
                             ? SizedBox(
                                 width: 18,
@@ -1167,25 +1406,33 @@ class _ComposerState extends State<Composer> {
                       IconButton(
                         key: const Key('composer-mic'),
                         tooltip: '语音输入',
-                        onPressed: busy ? null : _startVoice,
+                        onPressed: _startVoice,
                         icon: const Icon(Icons.mic_none_outlined),
                       ),
-                    if (!_listening && !_transcribing)
-                      IconButton.filled(
-                        key: const Key('composer-send'),
-                        tooltip: '发送',
-                        onPressed: busy ? null : _send,
-                        icon: busy
-                            ? SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: scheme.onPrimary,
-                                ),
-                              )
-                            : const Icon(Icons.arrow_upward),
+                    if (!_listening && !_transcribing) ...[
+                      if (busy)
+                        IconButton(
+                          key: const Key('composer-stop'),
+                          tooltip: '停止',
+                          onPressed: () =>
+                              unawaited(widget.store.cancelGeneration()),
+                          icon: const Icon(Icons.stop),
+                        ),
+                      Tooltip(
+                        message: busy ? '加入队列 · 长按立刻问' : '发送',
+                        child: GestureDetector(
+                          onLongPress: busy
+                              ? () => _send(insertNow: true)
+                              : null,
+                          child: IconButton.filled(
+                            key: const Key('composer-send'),
+                            tooltip: busy ? '加入队列' : '发送',
+                            onPressed: () => unawaited(_send()),
+                            icon: const Icon(Icons.arrow_upward),
+                          ),
+                        ),
                       ),
+                    ],
                   ],
                 ),
               ],
