@@ -451,6 +451,7 @@ void main() {
       api.finish(store.active!.pendingRunId!, '把 (x,y) 换成极坐标，r 就是到原点的距离。');
       await first;
       expect(store.active!.messages.last.text, contains('极坐标'));
+      final firstAgent = store.active!.agentId;
 
       final follow = store.send(text: '我没太明白，这个证明可微，到底怎么个流程？');
       await _until(() => store.active!.pendingRunId != null);
@@ -472,6 +473,8 @@ void main() {
         store.active!.messages.where((m) => m.text.contains('运行结束')),
         isEmpty,
       );
+      await _until(() => api.deletedAgents.contains(firstAgent));
+      expect(store.active!.agentId, isNot(firstAgent));
     },
   );
 
@@ -675,6 +678,9 @@ void main() {
     await talk('现在几点', '三点');
     expect(store.quickAgentId, isNot(firstAgent));
     expect(store.active!.agentId, store.quickAgentId);
+    await _until(() => api.deletedAgents.contains(firstAgent));
+    expect(api.deletedAgents, contains(firstAgent));
+    expect(api.deletedAgents, isNot(contains(store.quickAgentId)));
     expect(
       api.createdPrompts.any((p) => p.contains(kQuickAgentWarmup)),
       isTrue,
@@ -816,5 +822,7 @@ void main() {
     expect(store.quickAgentId, isNot(firstAgent));
     api.finish(store.active!.pendingRunId!, '好');
     await second;
+    await _until(() => api.deletedAgents.contains(firstAgent));
+    expect(api.deletedAgents, isNot(contains(store.quickAgentId)));
   });
 }

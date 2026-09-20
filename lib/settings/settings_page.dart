@@ -192,6 +192,7 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               Text(
                 '话题多了或最近一轮用量变大时，会在后台另建一只并在下一个新话题无感切过去。'
+                '换过去之后会删掉上一只，避免堆积。'
                 '用量取最近一轮 input+cacheRead，不是窗口还剩多少。设为 0 表示关掉该项。'
                 '正在聊的话题不会中途换 Agent。',
                 style: Theme.of(context).textTheme.bodySmall,
