@@ -210,10 +210,23 @@ class CursorModel {
 }
 
 class CursorApi {
-  CursorApi({required this.apiKey, this.baseUrl = 'https://api.cursor.com'});
+  CursorApi({
+    required this.apiKey,
+    this.baseUrl = 'https://api.cursor.com',
+    this.onLog,
+  });
 
   final String apiKey;
   final String baseUrl;
+  void Function(String event, Map<String, Object?> fields)? onLog;
+
+  void _log(String event, [Map<String, Object?> fields = const {}]) {
+    final sink = onLog;
+    if (sink == null) return;
+    try {
+      sink(event, fields);
+    } catch (_) {}
+  }
 
   Map<String, String> get _headers => {
     'Authorization': 'Bearer $apiKey',
@@ -316,7 +329,8 @@ class CursorApi {
     );
     final items = json['items'] as List? ?? json['agents'] as List? ?? const [];
     return [
-      for (final item in items) _agentInfo(Map<String, dynamic>.from(item as Map)),
+      for (final item in items)
+        _agentInfo(Map<String, dynamic>.from(item as Map)),
     ];
   }
 
@@ -376,7 +390,7 @@ class CursorApi {
     List<PromptImage> images = const [],
   }) async {
     CursorApiException? last;
-    for (var i = 0; i < 8; i++) {
+    for (var i = 0; i < 4; i++) {
       try {
         final json = await _json(
           'POST',
@@ -384,18 +398,24 @@ class CursorApi {
           body: {'prompt': _prompt(text, images)},
         );
         final run = json['run'] as Map<String, dynamic>? ?? json;
-        return run['id'] as String;
+        final id = run['id'] as String;
+        _log('create-run', {'agentId': agentId, 'runId': id});
+        return id;
       } on CursorApiException catch (e) {
         last = e;
-        if (e.status == 409 || e.status == 404) {
-          await Future<void>.delayed(Duration(seconds: 1 + i));
+        _log('create-run-error', {
+          'agentId': agentId,
+          'status': e.status,
+          'body': e.body.length > 500 ? e.body.substring(0, 500) : e.body,
+        });
+        if (e.status == 404) {
+          await Future<void>.delayed(Duration(milliseconds: 200 * (i + 1)));
           continue;
         }
-        if (e.isStreamGone) rethrow;
         rethrow;
       }
     }
-    throw last ?? CursorApiException(409, 'agent_busy');
+    throw last ?? CursorApiException(404, 'agent_not_ready');
   }
 
   Future<Map<String, dynamic>> getRun(String agentId, String runId) async {
@@ -408,10 +428,78 @@ class CursorApi {
   }
 
   /// Streams assistant text deltas. Completes with the final text.
-  /// If the socket drops (app backgrounded, radio sleep), falls back to polling.
+  /// A stream `error` event is not a finished run: reconnect, then poll Get Run.
+  /// Text seen before a `result` event is not treated as the final reply.
   Future<String> streamRun({
     required String agentId,
     required String runId,
+    required void Function(String delta) onDelta,
+    void Function(String status)? onStatus,
+    void Function(String delta)? onThinking,
+    CancelToken? cancelToken,
+  }) async {
+    final assembled = StringBuffer();
+    String? lastEventId;
+    var resumeReason = 'closed';
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (cancelToken?.isCancelled == true) {
+        throw RunFailedException('CANCELLED');
+      }
+      if (attempt > 0 && (lastEventId == null || lastEventId.isEmpty)) {
+        break;
+      }
+      final read = await _readStream(
+        agentId: agentId,
+        runId: runId,
+        lastEventId: attempt == 0 ? null : lastEventId,
+        assembled: assembled,
+        onDelta: onDelta,
+        onStatus: onStatus,
+        onThinking: onThinking,
+        cancelToken: cancelToken,
+      );
+      if (read.lastEventId != null && read.lastEventId!.isNotEmpty) {
+        lastEventId = read.lastEventId;
+      }
+      if (read.terminal) {
+        return read.text ?? assembled.toString();
+      }
+      resumeReason = read.resume ?? 'closed';
+      _log('stream-resume', {
+        'agentId': agentId,
+        'runId': runId,
+        'attempt': attempt,
+        'reason': resumeReason,
+      });
+    }
+    if (cancelToken?.isCancelled == true) {
+      throw RunFailedException('CANCELLED');
+    }
+    try {
+      final polled = await waitForRunText(agentId, runId);
+      if (polled.trim().isEmpty) {
+        return assembled.isNotEmpty ? assembled.toString() : polled;
+      }
+      if (assembled.isEmpty || polled.length >= assembled.length) {
+        return polled;
+      }
+      return assembled.toString();
+    } catch (e) {
+      if (e is RunFailedException) rethrow;
+      if (assembled.isNotEmpty && resumeReason == 'closed') {
+        final run = await getRun(agentId, runId);
+        final st = run['status'] as String? ?? '';
+        if (!isLiveRunStatus(st)) return assembled.toString();
+      }
+      rethrow;
+    }
+  }
+
+  Future<_StreamRead> _readStream({
+    required String agentId,
+    required String runId,
+    required String? lastEventId,
+    required StringBuffer assembled,
     required void Function(String delta) onDelta,
     void Function(String status)? onStatus,
     void Function(String delta)? onThinking,
@@ -424,82 +512,108 @@ class CursorApi {
       client.close(force: true);
       throw RunFailedException('CANCELLED');
     }
-    final assembled = StringBuffer();
-    var poll = false;
+    String? newestId = lastEventId;
+    var deltas = 0;
     try {
       final req = await client.getUrl(uri);
       req.headers.set(HttpHeaders.authorizationHeader, 'Bearer $apiKey');
       req.headers.set(HttpHeaders.acceptHeader, 'text/event-stream');
+      if (lastEventId != null && lastEventId.isNotEmpty) {
+        req.headers.set('Last-Event-ID', lastEventId);
+      }
       final res = await req.close();
       if (res.statusCode == 410) {
-        poll = true;
-      } else if (res.statusCode < 200 || res.statusCode >= 300) {
+        return _StreamRead.resume('http-410', newestId);
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
         final body = await utf8.decodeStream(res);
         final err = CursorApiException(res.statusCode, body);
         if (err.isStreamGone) {
-          poll = true;
-        } else {
-          throw err;
+          return _StreamRead.resume('stream-gone', newestId);
         }
-      } else {
-        final parser = SseParser();
-        await for (final chunk in res.transform(utf8.decoder)) {
-          for (final event in parser.add(chunk)) {
-            Map<String, dynamic> data = const {};
-            if (event.data.isNotEmpty) {
-              try {
-                data = jsonDecode(event.data) as Map<String, dynamic>;
-              } catch (_) {}
-            }
-            switch (event.event) {
-              case 'status':
-                final st = data['status'] as String? ?? '';
-                onStatus?.call(st);
-                if (isFailedRunStatus(st)) {
-                  throw RunFailedException(
-                    st,
-                    message: runFailureMessage(data),
-                  );
-                }
-              case 'thinking':
-                final think = data['text'] as String? ?? '';
-                if (think.isNotEmpty) onThinking?.call(think);
-              case 'assistant':
-                final text = data['text'] as String? ?? '';
-                if (text.isNotEmpty) {
-                  assembled.write(text);
-                  onDelta(text);
-                }
-              case 'result':
-                final st = data['status'] as String? ?? '';
-                if (isFailedRunStatus(st)) {
-                  throw RunFailedException(
-                    st,
-                    message: runFailureMessage(data),
-                  );
-                }
-                final text = data['text'] as String?;
-                if (text != null && text.isNotEmpty) {
-                  if (isFailedAssistantText(text)) {
-                    throw RunFailedException('ERROR', message: text);
-                  }
-                  return text;
-                }
-              case 'error':
-                throw RunFailedException(
-                  'ERROR',
-                  code: data['code'] as String?,
-                  message: data['message'] as String? ?? event.data,
-                );
-              case 'done':
-                if (assembled.isNotEmpty) return assembled.toString();
-                poll = true;
-            }
+        throw err;
+      }
+      final parser = SseParser();
+      await for (final chunk in res.transform(utf8.decoder)) {
+        for (final event in parser.add(chunk)) {
+          if (event.id != null && event.id!.isNotEmpty) newestId = event.id;
+          Map<String, dynamic> data = const {};
+          if (event.data.isNotEmpty) {
+            try {
+              data = jsonDecode(event.data) as Map<String, dynamic>;
+            } catch (_) {}
+          }
+          switch (event.event) {
+            case 'status':
+              final st = data['status'] as String? ?? '';
+              onStatus?.call(st);
+              _log('run-status', {
+                'agentId': agentId,
+                'runId': runId,
+                'status': st,
+              });
+              if (isFailedRunStatus(st)) {
+                throw RunFailedException(st, message: runFailureMessage(data));
+              }
+            case 'thinking':
+              final think = data['text'] as String? ?? '';
+              if (think.isNotEmpty) onThinking?.call(think);
+            case 'assistant':
+              final text = data['text'] as String? ?? '';
+              if (text.isNotEmpty) {
+                assembled.write(text);
+                deltas++;
+                onDelta(text);
+              }
+            case 'result':
+              final st = data['status'] as String? ?? '';
+              _log('run-result', {
+                'agentId': agentId,
+                'runId': runId,
+                'status': st,
+                'deltas': deltas,
+              });
+              if (isFailedRunStatus(st)) {
+                throw RunFailedException(st, message: runFailureMessage(data));
+              }
+              final text = data['text'] as String?;
+              if (text != null &&
+                  text.isNotEmpty &&
+                  isFailedAssistantText(text)) {
+                throw RunFailedException('ERROR', message: text);
+              }
+              if (text != null && text.isNotEmpty) {
+                return _StreamRead.terminal(text, newestId);
+              }
+              return _StreamRead.terminal(assembled.toString(), newestId);
+            case 'error':
+              final code = data['code'] as String? ?? '';
+              final message = data['message'] as String? ?? event.data;
+              _log('sse-error', {
+                'agentId': agentId,
+                'runId': runId,
+                'code': code,
+                'message': message.length > 500
+                    ? message.substring(0, 500)
+                    : message,
+              });
+              return _StreamRead.resume(
+                code.isEmpty ? 'sse-error' : 'sse-error:$code',
+                newestId,
+              );
+            case 'done':
+              return _StreamRead.resume('done', newestId);
+            default:
+              break;
           }
         }
-        if (assembled.isNotEmpty) return assembled.toString();
-        poll = true;
       }
+      _log('stream-closed', {
+        'agentId': agentId,
+        'runId': runId,
+        'deltas': deltas,
+      });
+      return _StreamRead.resume('closed', newestId);
     } on RunFailedException {
       rethrow;
     } on CursorApiException catch (e) {
@@ -507,36 +621,16 @@ class CursorApi {
         throw RunFailedException('CANCELLED');
       }
       if (e.status != 0 && !e.isStreamGone) rethrow;
-      poll = true;
+      return _StreamRead.resume('network', newestId);
     } catch (e) {
       if (cancelToken?.isCancelled == true) {
         throw RunFailedException('CANCELLED');
       }
       if (!isTransientNetworkError(e)) rethrow;
-      poll = true;
+      return _StreamRead.resume('network', newestId);
     } finally {
       client.close(force: true);
     }
-    if (cancelToken?.isCancelled == true) {
-      throw RunFailedException('CANCELLED');
-    }
-    if (poll) {
-      try {
-        final polled = await waitForRunText(agentId, runId);
-        if (polled.trim().isEmpty) {
-          return assembled.isNotEmpty ? assembled.toString() : polled;
-        }
-        if (assembled.isEmpty || polled.length >= assembled.length) {
-          return polled;
-        }
-        return assembled.toString();
-      } catch (e) {
-        if (e is RunFailedException) rethrow;
-        if (assembled.isNotEmpty) return assembled.toString();
-        rethrow;
-      }
-    }
-    return assembled.toString();
   }
 
   Future<String> waitForRunText(String agentId, String runId) async {
@@ -612,6 +706,17 @@ class CursorApi {
       client.close(force: true);
     }
   }
+}
+
+class _StreamRead {
+  _StreamRead.terminal(this.text, this.lastEventId) : resume = null;
+  _StreamRead.resume(this.resume, this.lastEventId) : text = null;
+
+  final String? text;
+  final String? resume;
+  final String? lastEventId;
+
+  bool get terminal => resume == null;
 }
 
 bool isTransientNetworkError(Object e) {

@@ -175,6 +175,13 @@ class CursorApiException implements Exception {
         b.contains('no longer available');
   }
 
+  /// POST /runs while another run is CREATING or RUNNING.
+  bool get isAgentBusy {
+    if (status != 409 || isStreamGone) return false;
+    final b = body.toLowerCase();
+    return !b.contains('run_not_cancellable');
+  }
+
   @override
   String toString() => 'Cursor API $status: $body';
 }
@@ -209,6 +216,9 @@ class RunFailedException implements Exception {
 
 bool isFailedRunStatus(String status) =>
     status == 'ERROR' || status == 'CANCELLED' || status == 'EXPIRED';
+
+bool isLiveRunStatus(String status) =>
+    status == 'CREATING' || status == 'RUNNING';
 
 bool isFailedAssistantText(String text) {
   final t = text.trim();

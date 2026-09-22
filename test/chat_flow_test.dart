@@ -104,21 +104,24 @@ void main() {
     expect(looksLikeQuestion(a.title), isFalse);
   });
 
-  test('topic prompt uses a stable #T- code without dumping follow-up history', () {
-    final prompt = quickTopicTurnPrompt(
-      topicCode: '#T-ABCDEF',
-      question: '那穿什么',
-      messages: [
-        ChatMessage(id: 'u1', role: 'user', text: '今天热不热'),
-        ChatMessage(id: 'a1', role: 'assistant', text: '有点热。'),
-        ChatMessage(id: 'u2', role: 'user', text: '那穿什么'),
-      ],
-    );
-    expect(prompt, contains('#T-ABCDEF'));
-    expect(prompt, contains('用户：那穿什么'));
-    expect(prompt.contains('今天热不热'), isFalse);
-    expect(prompt.contains('独立话题'), isFalse);
-  });
+  test(
+    'topic prompt uses a stable #T- code without dumping follow-up history',
+    () {
+      final prompt = quickTopicTurnPrompt(
+        topicCode: '#T-ABCDEF',
+        question: '那穿什么',
+        messages: [
+          ChatMessage(id: 'u1', role: 'user', text: '今天热不热'),
+          ChatMessage(id: 'a1', role: 'assistant', text: '有点热。'),
+          ChatMessage(id: 'u2', role: 'user', text: '那穿什么'),
+        ],
+      );
+      expect(prompt, contains('#T-ABCDEF'));
+      expect(prompt, contains('用户：那穿什么'));
+      expect(prompt.contains('今天热不热'), isFalse);
+      expect(prompt.contains('独立话题'), isFalse);
+    },
+  );
 
   test('continuity prompt keeps prior Q&A and drops error bubbles', () {
     final prompt = conversationContinuityPrompt([
@@ -207,10 +210,7 @@ void main() {
       expect(api.createdPrompts.last, contains('#T-'));
       expect(api.createdPrompts.last, contains('1+1等于几'));
       expect(api.createdPrompts.last.contains('今天天气'), isFalse);
-      expect(
-        store.topicChats.map((c) => c.topicCode).toSet(),
-        hasLength(2),
-      );
+      expect(store.topicChats.map((c) => c.topicCode).toSet(), hasLength(2));
       api.finish(store.active!.pendingRunId!, '2');
       await second;
     },
@@ -254,7 +254,10 @@ void main() {
     store.activeId = 'iso';
     await store.deleteChat('iso');
     expect(api.deletedAgents, contains('bc-gone'));
-    expect(store.conversations.where((c) => c.kind == ConversationKind.quick), isEmpty);
+    expect(
+      store.conversations.where((c) => c.kind == ConversationKind.quick),
+      isEmpty,
+    );
   });
 
   testWidgets('typing in B works while A is still loading', (tester) async {
@@ -694,35 +697,83 @@ void main() {
     expect(store.active!.agentId, store.quickAgentId);
   });
 
-  test('in-flight topic queues another topic instead of a second agent', () async {
+  test('queued topics on one agent run in send order', () async {
     final api = FakeCursorApi();
     final store = ChatStore(client: api);
     store.apiKey = 'k';
+    store.quickAgentRotateAfter = 0;
+    store.quickAgentRotateTokens = 0;
     store.conversations.clear();
 
     store.newChat();
-    final first = store.send(text: '天气怎么样');
-    await _until(() => store.active!.pendingRunId != null);
     final firstId = store.active!.id;
-    final firstAgent = store.quickAgentId;
+    final first = store.send(text: '第一句');
+    await _until(() => store.active!.pendingRunId != null);
+    final agent = store.quickAgentId;
 
     store.newChat();
-    unawaited(store.send(text: '1+1等于几'));
+    unawaited(store.send(text: '第二句'));
     await _until(() => store.active!.messages.any((m) => m.queued));
-    expect(api.createdPrompts, hasLength(1));
-    expect(store.quickAgentId, firstAgent);
+    final secondId = store.active!.id;
 
+    store.newChat();
+    unawaited(store.send(text: '第三句'));
+    await _until(() => store.active!.messages.any((m) => m.queued));
+
+    expect(api.createdPrompts, hasLength(1));
     api.finish(
       store.conversations.firstWhere((c) => c.id == firstId).pendingRunId!,
-      '晴',
+      '一',
     );
     await first;
     await _until(() => api.createdPrompts.length == 2);
-    expect(store.quickAgentId, firstAgent);
-    expect(store.active!.agentId, firstAgent);
-    api.finish(store.active!.pendingRunId!, '2');
-    await _until(() => !store.isSending(store.activeId));
+    expect(api.createdPrompts.last, contains('第二句'));
+    final second = store.conversations.firstWhere((c) => c.id == secondId);
+    expect(second.agentId, agent);
+
+    api.finish(second.pendingRunId!, '二');
+    await _until(() => api.createdPrompts.length == 3);
+    expect(api.createdPrompts.last, contains('第三句'));
+    expect(store.quickAgentId, agent);
+    final third = store.conversations.firstWhere(
+      (c) => c.messages.any((m) => m.text == '第三句'),
+    );
+    api.finish(third.pendingRunId!, '三');
+    await _until(() => !store.isSending(third.id));
   });
+
+  test(
+    'in-flight topic queues another topic instead of a second agent',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.conversations.clear();
+
+      store.newChat();
+      final first = store.send(text: '天气怎么样');
+      await _until(() => store.active!.pendingRunId != null);
+      final firstId = store.active!.id;
+      final firstAgent = store.quickAgentId;
+
+      store.newChat();
+      unawaited(store.send(text: '1+1等于几'));
+      await _until(() => store.active!.messages.any((m) => m.queued));
+      expect(api.createdPrompts, hasLength(1));
+      expect(store.quickAgentId, firstAgent);
+
+      api.finish(
+        store.conversations.firstWhere((c) => c.id == firstId).pendingRunId!,
+        '晴',
+      );
+      await first;
+      await _until(() => api.createdPrompts.length == 2);
+      expect(store.quickAgentId, firstAgent);
+      expect(store.active!.agentId, firstAgent);
+      api.finish(store.active!.pendingRunId!, '2');
+      await _until(() => !store.isSending(store.activeId));
+    },
+  );
 
   test('old-topic replay does not rotate again', () async {
     final api = FakeCursorApi();
@@ -796,33 +847,465 @@ void main() {
     expect(store.error, isNotNull);
   });
 
-  test('token threshold precreates and rotates on the next new topic', () async {
+  test(
+    'token threshold precreates and rotates on the next new topic',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.quickAgentRotateAfter = 0;
+      store.quickAgentRotateTokens = 100;
+      store.conversations.clear();
+
+      store.newChat();
+      api.usageResponse = const AgentTokenUsage(
+        inputTokens: 40,
+        cacheReadTokens: 70,
+      );
+      final first = store.send(text: '很长的上下文');
+      await _until(() => store.active!.pendingRunId != null);
+      final firstAgent = store.quickAgentId;
+      api.finish(store.active!.pendingRunId!, '收到');
+      await first;
+      await _until(() => store.quickAgentLastInputTokens >= 100);
+
+      store.newChat();
+      final second = store.send(text: '新话题');
+      await _until(() => store.active!.pendingRunId != null);
+      expect(store.quickAgentId, isNot(firstAgent));
+      api.finish(store.active!.pendingRunId!, '好');
+      await second;
+      await _until(() => api.deletedAgents.contains(firstAgent));
+      expect(api.deletedAgents, isNot(contains(store.quickAgentId)));
+    },
+  );
+
+  test('stream error while the run is live is not shown as 没答出来', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.conversations
+      ..clear()
+      ..add(Conversation(id: 'a', title: 'A'));
+    store.activeId = 'a';
+    api.nextStreamError = RunFailedException('ERROR');
+    final fut = store.send(text: '你好');
+    await _until(() => api.waitCalls > 0);
+    expect(store.active!.messages.last.text.contains('没答出来'), isFalse);
+    expect(store.active!.pendingRunId, isNotNull);
+    final runId = store.active!.pendingRunId!;
+    final runs = api.createRunCalls;
+    api.finish(runId, '补上的答复');
+    await fut;
+    expect(store.active!.messages.last.text, contains('补上的答复'));
+    expect(api.createRunCalls, runs);
+    expect(store.active!.pendingRunId, isNull);
+  });
+
+  test('retry adopts a still-running run instead of createRun again', () async {
     final api = FakeCursorApi();
     final store = ChatStore(client: api);
     store.apiKey = 'k';
     store.quickAgentRotateAfter = 0;
-    store.quickAgentRotateTokens = 100;
-    store.conversations.clear();
-
-    store.newChat();
-    api.usageResponse = const AgentTokenUsage(
-      inputTokens: 40,
-      cacheReadTokens: 70,
+    store.quickAgentRotateTokens = 0;
+    store.quickAgentId = 'bc-q';
+    store.quickAgentModelStamp = store.modelStamp;
+    store.conversations
+      ..clear()
+      ..add(
+        Conversation(
+          id: 'a',
+          title: 'A',
+          kind: ConversationKind.topic,
+          topicCode: 'Q1',
+          agentId: 'bc-q',
+          messages: [
+            ChatMessage(id: 'u', role: 'user', text: '你好'),
+            ChatMessage(
+              id: 's',
+              role: 'assistant',
+              text: '出错了：这次没答出来。点重发再试，或新开对话。',
+            ),
+          ],
+        ),
+      );
+    store.quickAgentSentTopicIds.add('a');
+    store.activeId = 'a';
+    api.latestRunId = 'run-live';
+    api.runStatus['run-live'] = 'RUNNING';
+    api.nextCreateError = CursorApiException(
+      409,
+      '{"error":{"code":"agent_busy"}}',
     );
-    final first = store.send(text: '很长的上下文');
-    await _until(() => store.active!.pendingRunId != null);
-    final firstAgent = store.quickAgentId;
-    api.finish(store.active!.pendingRunId!, '收到');
-    await first;
-    await _until(() => store.quickAgentLastInputTokens >= 100);
+    final retry = store.retryLast();
+    await _until(() => api.streams.containsKey('run-live'));
+    expect(api.createRunCalls, 1);
+    api.finish('run-live', '接上了');
+    await retry;
+    expect(store.active!.messages.last.text, contains('接上了'));
+    expect(store.active!.messages.last.text.contains('agent_busy'), isFalse);
+    expect(api.createRunCalls, 1);
+  });
 
+  test('retry queues while another quick topic holds the agent', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 0;
+    store.quickAgentRotateTokens = 0;
+    store.quickAgentId = 'bc-q';
+    store.quickAgentModelStamp = store.modelStamp;
+    store.conversations
+      ..clear()
+      ..addAll([
+        Conversation(
+          id: 'a',
+          title: 'A',
+          kind: ConversationKind.topic,
+          topicCode: 'Q1',
+          agentId: 'bc-q',
+          messages: [
+            ChatMessage(id: 'u', role: 'user', text: '你好'),
+            ChatMessage(
+              id: 's',
+              role: 'assistant',
+              text: '出错了：这次没答出来。点重发再试，或新开对话。',
+            ),
+          ],
+        ),
+        Conversation(
+          id: 'b',
+          title: 'B',
+          kind: ConversationKind.topic,
+          topicCode: 'Q2',
+          agentId: 'bc-q',
+        ),
+      ]);
+    store.activeId = 'b';
+    final sendB = store.send(text: '在忙');
+    await _until(() => store.isSending('b'));
+    await _until(
+      () =>
+          store.conversations.firstWhere((c) => c.id == 'b').pendingRunId !=
+          null,
+    );
+    final runs = api.createRunCalls;
+    final retry = store.retryLast(chatId: 'a');
+    await retry;
+    expect(api.createRunCalls, runs);
+    expect(
+      store.conversations.firstWhere((c) => c.id == 'a').messages.last.text,
+      contains('没答出来'),
+    );
+
+    final bRun = store.conversations
+        .firstWhere((c) => c.id == 'b')
+        .pendingRunId!;
+    api.finish(bRun, '好');
+    await sendB;
+    await _until(() => store.isSending('a'));
+    expect(api.createRunCalls, runs + 1);
+    await _until(
+      () =>
+          store.conversations.firstWhere((c) => c.id == 'a').pendingRunId !=
+          null,
+    );
+    api.finish(
+      store.conversations.firstWhere((c) => c.id == 'a').pendingRunId!,
+      '重发成功',
+    );
+    await _until(() => !store.isSending('a'));
+    expect(
+      store.conversations.firstWhere((c) => c.id == 'a').messages.last.text,
+      contains('重发成功'),
+    );
+  });
+
+  test('warmup stays unready until its run is terminal', () async {
+    final api = FakeCursorApi()..autoFinishWarmup = false;
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 3;
+    store.quickAgentRotateTokens = 0;
+    store.conversations.clear();
     store.newChat();
-    final second = store.send(text: '新话题');
+    final first = store.send(text: '天气');
     await _until(() => store.active!.pendingRunId != null);
-    expect(store.quickAgentId, isNot(firstAgent));
-    api.finish(store.active!.pendingRunId!, '好');
-    await second;
-    await _until(() => api.deletedAgents.contains(firstAgent));
-    expect(api.deletedAgents, isNot(contains(store.quickAgentId)));
+    api.finish(store.active!.pendingRunId!, '晴');
+    await first;
+    await _until(
+      () => api.runStatus.values.any((status) => status != 'FINISHED'),
+    );
+    expect(store.nextQuickAgentReady, isFalse);
+    final warm = api.runStatus.entries
+        .firstWhere((e) => e.value != 'FINISHED')
+        .key;
+    api.finish(warm, 'OK');
+    await _until(() => store.nextQuickAgentReady);
+  });
+
+  test(
+    'model change drops standby; next new topic creates with the new model',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.models = [
+        const CursorModel(id: 'composer-2.5', displayName: 'Composer'),
+        const CursorModel(id: 'claude', displayName: 'Claude'),
+      ];
+      store.selectModel('composer-2.5', persist: false);
+      store.quickAgentRotateAfter = 3;
+      store.quickAgentRotateTokens = 0;
+      store.conversations.clear();
+      store.newChat();
+      final first = store.send(text: '天气');
+      await _until(() => store.active!.pendingRunId != null);
+      api.finish(store.active!.pendingRunId!, '晴');
+      await first;
+      await _until(() => store.nextQuickAgentReady);
+      final standby = store.nextQuickAgentId!;
+      final current = store.quickAgentId!;
+      store.selectModel('claude', persist: false);
+      expect(store.nextQuickAgentId, isNull);
+      await _until(() => api.deletedAgents.contains(standby));
+
+      store.newChat();
+      final second = store.send(text: '新话题');
+      await _until(() => store.active!.pendingRunId != null);
+      expect(api.createdModelIds.last, 'claude');
+      expect(store.quickAgentId, isNot(current));
+      expect(store.quickAgentId, isNot(standby));
+      api.finish(store.active!.pendingRunId!, '好');
+      await second;
+      expect(store.runLog.entries.any((e) => e.modelId == 'claude'), isTrue);
+    },
+  );
+
+  test(
+    'the topic already in progress stays on its agent after a model change',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.models = [
+        const CursorModel(id: 'composer-2.5', displayName: 'Composer'),
+        const CursorModel(id: 'claude', displayName: 'Claude'),
+      ];
+      store.selectModel('composer-2.5', persist: false);
+      store.quickAgentRotateAfter = 0;
+      store.quickAgentRotateTokens = 0;
+      store.conversations.clear();
+      store.newChat();
+      final first = store.send(text: '天气');
+      await _until(() => store.active!.pendingRunId != null);
+      api.finish(store.active!.pendingRunId!, '晴');
+      await first;
+      final agent = store.quickAgentId;
+      final created = api.createdModelIds.length;
+      store.selectModel('claude', persist: false);
+      final follow = store.send(text: '明天呢');
+      await _until(() => store.active!.pendingRunId != null);
+      expect(store.quickAgentId, agent);
+      expect(api.createdModelIds.length, created);
+      expect(api.createRunCalls, greaterThan(0));
+      api.finish(store.active!.pendingRunId!, '雨');
+      await follow;
+    },
+  );
+
+  test('param change drops a standby built with the old params', () async {
+    SharedPreferences.setMockInitialValues({});
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.models = [
+      CursorModel(
+        id: 'composer-2.5',
+        displayName: 'Composer',
+        parameters: [
+          ModelParameter(
+            id: 'fast',
+            values: [
+              ModelParamChoice(value: 'false'),
+              ModelParamChoice(value: 'true'),
+            ],
+          ),
+        ],
+      ),
+    ];
+    store.selectModel('composer-2.5', persist: false);
+    store.setParam('fast', 'false');
+    store.quickAgentRotateAfter = 3;
+    store.quickAgentRotateTokens = 0;
+    store.conversations.clear();
+    store.newChat();
+    final first = store.send(text: '天气');
+    await _until(() => store.active!.pendingRunId != null);
+    api.finish(store.active!.pendingRunId!, '晴');
+    await first;
+    await _until(() => store.nextQuickAgentReady);
+    final standby = store.nextQuickAgentId!;
+    store.setParam('fast', 'true');
+    expect(store.nextQuickAgentId, isNull);
+    await _until(() => api.deletedAgents.contains(standby));
+  });
+
+  test(
+    'a new isolated chat uses the selected model; a follow-up does not',
+    () async {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.models = [
+        const CursorModel(id: 'composer-2.5', displayName: 'Composer'),
+        const CursorModel(id: 'claude', displayName: 'Claude'),
+      ];
+      store.selectModel('claude', persist: false);
+      store.conversations.clear();
+      store.newAgentChat();
+      final first = store.send(text: '你好');
+      await _until(() => store.active!.pendingRunId != null);
+      expect(api.createdModelIds.last, 'claude');
+      final created = api.createdModelIds.length;
+      api.finish(store.active!.pendingRunId!, '在');
+      await first;
+      final follow = store.send(text: '继续');
+      await _until(() => store.active!.pendingRunId != null);
+      expect(api.createRunCalls, 1);
+      expect(api.createdModelIds.length, created);
+      api.finish(store.active!.pendingRunId!, '好');
+      await follow;
+    },
+  );
+
+  test('a terminal failure is written to the run log', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 0;
+    store.quickAgentRotateTokens = 0;
+    store.quickAgentId = 'bc-q';
+    store.quickAgentModelStamp = store.modelStamp;
+    store.conversations
+      ..clear()
+      ..add(
+        Conversation(
+          id: 'a',
+          title: 'A',
+          kind: ConversationKind.topic,
+          topicCode: 'Q1',
+          agentId: 'bc-q',
+        ),
+      );
+    store.quickAgentSentTopicIds.add('a');
+    store.activeId = 'a';
+    final follow = store.send(text: '第二句');
+    await _until(() => store.active!.pendingRunId != null);
+    api.fail(store.active!.pendingRunId!);
+    await follow;
+    expect(
+      store.runLog.entries.any(
+        (e) => e.event == 'clear-pending' && (e.agentId ?? '').isNotEmpty,
+      ),
+      isTrue,
+    );
+  });
+
+  test('a missing quick agent is replaced instead of showing 404', () async {
+    final api = FakeCursorApi();
+    final store = ChatStore(client: api);
+    store.apiKey = 'k';
+    store.quickAgentRotateAfter = 0;
+    store.quickAgentRotateTokens = 0;
+    store.quickAgentId = 'bc-dead';
+    store.quickAgentModelStamp = store.modelStamp;
+    store.conversations.clear();
+    store.newChat();
+    api.nextCreateError = CursorApiException(
+      404,
+      '{"error":{"code":"agent_not_found","message":"Agent not found"}}',
+    );
+    final fut = store.send(text: '8+1');
+    await _until(() => store.active!.pendingRunId != null);
+    expect(store.quickAgentId, isNot('bc-dead'));
+    expect(api.createdPrompts.last, contains('你会同时处理多个互不干扰的话题'));
+    api.finish(store.active!.pendingRunId!, '9');
+    await fut;
+    expect(store.active!.messages.last.text, '9');
+    expect(store.active!.messages.last.text.contains('404'), isFalse);
+  });
+
+  test('retry during agent_busy never surfaces that error, 12 times', () async {
+    for (var i = 0; i < 12; i++) {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.quickAgentRotateAfter = 0;
+      store.quickAgentRotateTokens = 0;
+      store.quickAgentId = 'bc-q';
+      store.quickAgentModelStamp = store.modelStamp;
+      store.conversations
+        ..clear()
+        ..add(
+          Conversation(
+            id: 'a',
+            title: 'A',
+            kind: ConversationKind.topic,
+            topicCode: 'Q1',
+            agentId: 'bc-q',
+            messages: [
+              ChatMessage(id: 'u$i', role: 'user', text: '第$i次'),
+              ChatMessage(
+                id: 's$i',
+                role: 'assistant',
+                text: '出错了：这次没答出来。点重发再试，或新开对话。',
+              ),
+            ],
+          ),
+        );
+      store.quickAgentSentTopicIds.add('a');
+      store.activeId = 'a';
+      api.latestRunId = 'run-live-$i';
+      api.runStatus['run-live-$i'] = 'RUNNING';
+      api.nextCreateError = CursorApiException(
+        409,
+        '{"error":{"code":"agent_busy","message":"agent run busy"}}',
+      );
+      final retry = store.retryLast();
+      await _until(() => api.streams.containsKey('run-live-$i'));
+      api.finish('run-live-$i', '答$i');
+      await retry;
+      final text = store.active!.messages.last.text;
+      expect(text, contains('答$i'), reason: 'round $i');
+      expect(text.contains('agent_busy'), isFalse, reason: 'round $i busy');
+      expect(text.contains('agent run busy'), isFalse, reason: 'round $i run');
+      expect(store.error ?? '', isNot(contains('agent_busy')));
+    }
+  });
+
+  test('a false ERROR while the run is live stays silent, 8 times', () async {
+    for (var i = 0; i < 8; i++) {
+      final api = FakeCursorApi();
+      final store = ChatStore(client: api);
+      store.apiKey = 'k';
+      store.conversations
+        ..clear()
+        ..add(Conversation(id: 'a', title: 'A'));
+      store.activeId = 'a';
+      api.nextStreamError = RunFailedException('ERROR');
+      final fut = store.send(text: '问$i');
+      await _until(() => api.waitCalls > 0);
+      expect(
+        store.active!.messages.last.text.contains('没答出来'),
+        isFalse,
+        reason: 'round $i',
+      );
+      final runId = store.active!.pendingRunId!;
+      api.finish(runId, '好$i');
+      await fut;
+      expect(store.active!.messages.last.text, contains('好$i'));
+      expect(store.error, isNull);
+    }
   });
 }
