@@ -10,17 +10,23 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'api/cursor_api.dart';
 import 'models/models.dart';
 import 'quick_prompt.dart';
+import 'run_log.dart';
 import 'title.dart';
 import 'voice/create_engine.dart';
 import 'voice/local_sherpa_stt.dart';
 import 'voice/model_store.dart';
 import 'voice/voice_settings.dart';
 
+part 'store_lane.dart';
+part 'store_quick.dart';
+
 class ChatStore extends ChangeNotifier implements VoiceStoreView {
-  ChatStore({this._client, ModelStore? modelStore})
-    : modelStore = modelStore ?? ModelStore();
+  ChatStore({this._client, ModelStore? modelStore, RunLog? runLog})
+    : modelStore = modelStore ?? ModelStore(),
+      runLog = runLog ?? RunLog();
 
   final CursorApi? _client;
+  final RunLog runLog;
   @override
   final ModelStore modelStore;
   @override
@@ -39,6 +45,8 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   String? quickAgentId;
   String? nextQuickAgentId;
   bool nextQuickAgentReady = false;
+  String? quickAgentModelStamp;
+  String? nextQuickAgentModelStamp;
   int quickAgentRotateAfter = kDefaultRotateAfter;
   int quickAgentRotateTokens = kDefaultRotateTokens;
   int quickRuleRemindEvery = kDefaultRemindEvery;
@@ -49,6 +57,11 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   Future<void>? _precreateInFlight;
   int _quickGeneration = 0;
   final Set<String> _inFlight = {};
+  final Map<String, int> _busyHandoffs = {};
+  final Map<String, List<_SendJob>> _lanes = {};
+  final Set<String> _pumping = {};
+  final Map<String, String> _laneOf = {};
+  int _jobSeq = 0;
   final Set<String> _cancelRequested = {};
   final Map<String, CancelToken> _cancelTokens = {};
   List<AgentInfo> cloudAgents = [];
@@ -166,6 +179,12 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     return conversations.isEmpty ? null : conversations.first;
   }
 
+  /// Model id plus sorted params. A quick agent keeps the stamp it was born with.
+  String get modelStamp {
+    final keys = modelParams.keys.toList()..sort();
+    return '$modelId|${[for (final k in keys) '$k=${modelParams[k]}'].join(',')}';
+  }
+
   List<Map<String, String>> get _paramsForApi {
     final m = selectedModel;
     if (m == null) return const [];
@@ -177,11 +196,54 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
   }
 
   CursorApi? get _api {
-    if (_client != null) return _client;
+    final client = _client;
+    if (client != null) {
+      client.onLog ??= _onApiLog;
+      return client;
+    }
     final key = apiKey.trim();
     if (key.isEmpty) return null;
-    return CursorApi(apiKey: key);
+    return CursorApi(apiKey: key, onLog: _onApiLog);
   }
+
+  void _onApiLog(String event, Map<String, Object?> fields) {
+    _log(
+      event,
+      agentId: fields['agentId'] as String?,
+      runId: fields['runId'] as String?,
+      detail: fields.entries
+          .where((e) => e.key != 'agentId' && e.key != 'runId')
+          .map((e) => '${e.key}=${e.value}')
+          .join(' '),
+    );
+  }
+
+  void _log(
+    String event, {
+    Conversation? conv,
+    String? agentId,
+    String? runId,
+    String? detail,
+  }) {
+    final params = modelStamp.contains('|')
+        ? modelStamp.substring(modelStamp.indexOf('|') + 1)
+        : '';
+    runLog.add(
+      RunLogEntry(
+        time: DateTime.now(),
+        event: event,
+        conversationId: conv?.id,
+        topicCode: conv?.topicCode,
+        agentId: agentId,
+        runId: runId ?? conv?.pendingRunId,
+        modelId: modelId,
+        modelParams: params,
+        detail: clipLog(detail),
+      ),
+    );
+  }
+
+  Future<String> exportRunLog() => runLog.exportText();
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -259,8 +321,7 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
         usedTopicCodes
           ..clear()
           ..addAll([
-            for (final c in data['usedTopicCodes'] as List? ?? const [])
-              '$c',
+            for (final c in data['usedTopicCodes'] as List? ?? const []) '$c',
           ]);
         quickAgentSentTopicIds
           ..clear()
@@ -268,12 +329,19 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
             for (final c in data['quickAgentSentTopicIds'] as List? ?? const [])
               '$c',
           ]);
+        quickAgentModelStamp = data['quickAgentModelStamp'] as String?;
+        nextQuickAgentModelStamp = data['nextQuickAgentModelStamp'] as String?;
+        if (quickAgentId != null &&
+            quickAgentId!.isNotEmpty &&
+            (quickAgentModelStamp == null || quickAgentModelStamp!.isEmpty)) {
+          quickAgentModelStamp = modelStamp;
+        }
       }
     } catch (_) {}
+    unawaited(runLog.load());
     conversations.removeWhere((c) => c.kind == ConversationKind.quick);
     _ensureTopicCodes();
-    if (activeId == null ||
-        !conversations.any((c) => c.id == activeId)) {
+    if (activeId == null || !conversations.any((c) => c.id == activeId)) {
       activeId = conversations.isEmpty ? null : conversations.first.id;
     }
     _sortConversations();
@@ -402,14 +470,45 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     modelId = id;
     final m = selectedModel;
     modelParams = m?.alignedParams({}) ?? {};
+    _onModelChoiceChanged();
     notifyListeners();
     if (persist) unawaited(saveSettings());
   }
 
   void setParam(String id, String value) {
     modelParams[id] = value;
+    _onModelChoiceChanged();
     notifyListeners();
     unawaited(saveSettings());
+  }
+
+  void _onModelChoiceChanged() {
+    _log('model-choice', detail: modelStamp);
+    if (nextQuickAgentId == null || nextQuickAgentId!.isEmpty) return;
+    if (nextQuickAgentModelStamp == modelStamp) return;
+    _dropStandby('model-changed');
+  }
+
+  void _setQuickAgent(String? id) {
+    quickAgentId = id;
+    if (id == null || id.isEmpty) {
+      quickAgentModelStamp = null;
+    } else {
+      quickAgentModelStamp = modelStamp;
+    }
+  }
+
+  void _dropStandby(String reason) {
+    final id = nextQuickAgentId;
+    final inflight = _precreateInFlight != null;
+    nextQuickAgentId = null;
+    nextQuickAgentReady = false;
+    nextQuickAgentModelStamp = null;
+    _quickGeneration++;
+    _log('drop-standby', agentId: id, detail: reason);
+    if (id != null && id.isNotEmpty && !inflight) {
+      _retireQuickAgent(id);
+    }
   }
 
   void setVoiceMode(VoiceMode mode) {
@@ -582,896 +681,13 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
     return conv.agentId;
   }
 
-  bool _isAgentBusy(String? agentId) {
-    if (agentId == null || agentId.isEmpty) {
-      return false;
-    }
-    for (final c in conversations) {
-      if (_inFlight.contains(c.id) && c.agentId == agentId) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  bool _shouldQueue(Conversation conv) {
-    if (_inFlight.contains(conv.id)) return true;
-    if (conv.sharesQuickAgent) {
-      // Creating the first agent leaves quickAgentId empty, so "busy by id"
-      // would miss it and spawn a second shared agent.
-      for (final c in conversations) {
-        if (c.sharesQuickAgent && _inFlight.contains(c.id)) return true;
-      }
-      return false;
-    }
-    return _isAgentBusy(conv.agentId);
-  }
+  /// Extensions in this library cannot call [notifyListeners] directly.
+  void _emit() => notifyListeners();
 
   void clearError() {
     error = null;
     errorChatId = null;
     notifyListeners();
-  }
-
-  /// After the app is backgrounded or killed, pick up runs that already exist.
-  /// Also retries a failed last bubble when we still have a cloud run id.
-  Future<void> resumeInFlight() async {
-    final jobs = <Future<void>>[];
-    for (final c in List<Conversation>.from(conversations)) {
-      if (_inFlight.contains(c.id)) continue;
-      if (c.messages.isEmpty) continue;
-      final last = c.messages.last;
-      if (last.role != 'assistant') continue;
-      if (last.streaming) {
-        jobs.add(_resumeOne(c, last));
-      } else if (c.pendingRunId != null &&
-          c.pendingRunId!.isNotEmpty &&
-          (last.text.trim().isEmpty || isFailedAssistantText(last.text))) {
-        jobs.add(retryLast(chatId: c.id));
-      }
-    }
-    if (jobs.isEmpty) return;
-    await Future.wait(jobs);
-  }
-
-  Future<void> _resumeOne(Conversation conv, ChatMessage assistant) async {
-    final api = _api;
-    if (api == null) return;
-    if (!_inFlight.add(conv.id)) return;
-    if (errorChatId == conv.id) {
-      error = null;
-      errorChatId = null;
-    }
-    notifyListeners();
-    await _withWakeLock(() async {
-      try {
-        final ids = await _ensureRun(api, conv);
-        await _collectRun(api, conv, assistant, ids.$1, ids.$2);
-      } catch (e) {
-        error = friendlyNetworkError(e);
-        errorChatId = conv.id;
-        if (assistant.text.isEmpty || isFailedAssistantText(assistant.text)) {
-          assistant.text = '出错了：$error';
-        }
-        assistant.streaming = false;
-        if (e is RunFailedException || !isTransientNetworkError(e)) {
-          conv.pendingRunId = null;
-        }
-      } finally {
-        await _endSend(conv);
-      }
-    });
-  }
-
-  Future<void> send({
-    required String text,
-    List<PromptImage> images = const [],
-    bool insertNow = false,
-  }) async {
-    final api = _api;
-    if (api == null) {
-      error = '先在设置里填入 Cursor API Key';
-      errorChatId = null;
-      notifyListeners();
-      return;
-    }
-    var conv = active;
-    if (conv == null) {
-      newChat();
-      conv = active!;
-    }
-    final trimmed = text.trim();
-    if (trimmed.isEmpty && images.isEmpty) return;
-
-    if (insertNow && _shouldQueue(conv)) {
-      Conversation? busy;
-      final agentId = _resolvedAgentId(conv);
-      for (final c in conversations) {
-        if (_inFlight.contains(c.id) &&
-            (agentId == null || _resolvedAgentId(c) == agentId)) {
-          busy = c;
-          break;
-        }
-      }
-      if (busy != null) await cancelGeneration(chatId: busy.id);
-    }
-
-    final displayText = trimmed.isEmpty ? '（图片）' : trimmed;
-    final user = ChatMessage(
-      id: uuid.v4(),
-      role: 'user',
-      text: displayText,
-      queued: _shouldQueue(conv),
-      rush: insertNow,
-      imagePaths: [
-        for (final img in images)
-          if (img.path != null) img.path!,
-      ],
-    );
-    conv.messages.add(user);
-    if (!conv.titleFrozen) {
-      conv.title = conversationTitle(displayText);
-    }
-    conv.updatedAt = DateTime.now();
-    error = null;
-    errorChatId = null;
-    notifyListeners();
-    unawaited(_persist());
-
-    if (user.queued) return;
-    await _launchTurn(api, conv, user, images);
-  }
-
-  Future<void> cancelGeneration({String? chatId}) async {
-    Conversation? conv;
-    if (chatId != null) {
-      for (final c in conversations) {
-        if (c.id == chatId) conv = c;
-      }
-    } else {
-      conv = active;
-    }
-    if (conv == null || !_inFlight.contains(conv.id)) return;
-    _cancelRequested.add(conv.id);
-    _cancelTokens[conv.id]?.cancel();
-    final agentId = _resolvedAgentId(conv);
-    final runId = conv.pendingRunId;
-    if (agentId != null && runId != null && runId.isNotEmpty) {
-      try {
-        await _api?.cancelRun(agentId, runId);
-      } catch (_) {}
-    }
-  }
-
-  void removeQueued(String messageId) {
-    for (final c in conversations) {
-      final before = c.messages.length;
-      c.messages.removeWhere((m) => m.id == messageId && m.queued);
-      if (c.messages.length != before) {
-        notifyListeners();
-        unawaited(_persist());
-        return;
-      }
-    }
-  }
-
-  Future<void> _launchTurn(
-    CursorApi api,
-    Conversation conv,
-    ChatMessage user,
-    List<PromptImage> images,
-  ) async {
-    user.queued = false;
-    user.rush = false;
-    final assistant = ChatMessage(
-      id: uuid.v4(),
-      role: 'assistant',
-      text: '',
-      streaming: true,
-    );
-    conv.messages.add(assistant);
-    _inFlight.add(conv.id);
-    notifyListeners();
-    unawaited(_persist());
-
-    final question = _questionFromUserText(
-      user.text == '（图片）' ? '' : user.text,
-    );
-    final userTurns = conv.messages.where((m) => m.role == 'user').length;
-    await _withWakeLock(() async {
-      await _driveTurn(
-        api: api,
-        conversation: conv,
-        assistant: assistant,
-        question: question,
-        images: images,
-        userTurns: userTurns,
-      );
-    });
-  }
-
-  Future<void> _drainQueued(String? agentId) async {
-    if (agentId != null && _isAgentBusy(agentId)) return;
-    ChatMessage? pick;
-    Conversation? host;
-    for (final c in conversations) {
-      if (agentId != null && _resolvedAgentId(c) != agentId) continue;
-      if (agentId == null && _resolvedAgentId(c) != null) continue;
-      if (_inFlight.contains(c.id)) continue;
-      for (final m in c.messages) {
-        if (m.role != 'user' || !m.queued) continue;
-        if (pick == null || (m.rush && !pick.rush)) {
-          pick = m;
-          host = c;
-        }
-      }
-    }
-    if (pick == null || host == null) return;
-    final api = _api;
-    if (api == null) return;
-    final images = await _imagesFor(pick);
-    await _launchTurn(api, host, pick, images);
-  }
-
-  /// Resend the last user turn in place. Does not add another user bubble.
-  Future<void> retryLast({String? chatId}) async {
-    final api = _api;
-    if (api == null) {
-      error = '先在设置里填入 Cursor API Key';
-      errorChatId = null;
-      notifyListeners();
-      return;
-    }
-    Conversation? conv;
-    if (chatId != null) {
-      for (final c in conversations) {
-        if (c.id == chatId) conv = c;
-      }
-    } else {
-      conv = active;
-    }
-    final target = _retryTarget(conv);
-    if (target == null) return;
-    if (_inFlight.contains(target.conv.id)) return;
-
-    final images = await _imagesFor(target.user);
-    target.assistant
-      ..text = ''
-      ..thinking = ''
-      ..streaming = true;
-    _inFlight.add(target.conv.id);
-    error = null;
-    errorChatId = null;
-    notifyListeners();
-    unawaited(_persist());
-
-    final question = _questionFromUser(target.user);
-    final userTurns = target.conv.messages
-        .where((m) => m.role == 'user')
-        .length;
-    final resumeExisting =
-        target.conv.agentId != null &&
-        target.conv.pendingRunId != null &&
-        target.conv.pendingRunId!.isNotEmpty;
-
-    await _withWakeLock(() async {
-      await _driveTurn(
-        api: api,
-        conversation: target.conv,
-        assistant: target.assistant,
-        question: question,
-        images: images,
-        userTurns: userTurns,
-        resumeExisting: resumeExisting,
-      );
-    });
-  }
-
-  Future<void> _driveTurn({
-    required CursorApi api,
-    required Conversation conversation,
-    required ChatMessage assistant,
-    required String question,
-    required List<PromptImage> images,
-    required int userTurns,
-    bool resumeExisting = false,
-  }) async {
-    try {
-      Object? fail;
-      try {
-        if (_cancelRequested.remove(conversation.id)) {
-          throw RunFailedException('CANCELLED');
-        }
-        if (resumeExisting &&
-            conversation.agentId != null &&
-            conversation.pendingRunId != null &&
-            conversation.pendingRunId!.isNotEmpty) {
-          await _collectRun(
-            api,
-            conversation,
-            assistant,
-            conversation.agentId!,
-            conversation.pendingRunId!,
-          );
-        } else {
-          if (conversation.sharesQuickAgent) {
-            await _prepareQuickSend(api, conversation);
-          }
-          final creatingQuick =
-              conversation.sharesQuickAgent &&
-              (quickAgentId == null || quickAgentId!.isEmpty);
-          if (!conversation.sharesQuickAgent && conversation.agentId == null) {
-            conversation.agentId = 'bc-${uuid.v4()}';
-            unawaited(_persist());
-          }
-          final reuseAgent = conversation.sharesQuickAgent
-              ? !creatingQuick
-              : userTurns > 1;
-          final apiText = _promptForTurn(
-            conversation,
-            question,
-            userTurns,
-            creatingQuick: creatingQuick,
-          );
-          if (_cancelRequested.remove(conversation.id)) {
-            throw RunFailedException('CANCELLED');
-          }
-          final created = reuseAgent
-              ? await _createFollowUp(
-                  api,
-                  conversation,
-                  apiText,
-                  images,
-                  agentId: conversation.sharesQuickAgent
-                      ? quickAgentId
-                      : conversation.agentId,
-                )
-              : await _createFirstRun(
-                  api,
-                  conversation,
-                  apiText,
-                  images,
-                  agentId: conversation.sharesQuickAgent
-                      ? (quickAgentId ?? 'bc-${uuid.v4()}')
-                      : conversation.agentId,
-                );
-          if (conversation.sharesQuickAgent) {
-            quickAgentId = created.agentId;
-          }
-          conversation.agentId = created.agentId;
-          conversation.pendingRunId = created.runId;
-          unawaited(_persist());
-          if (_cancelRequested.remove(conversation.id)) {
-            try {
-              await api.cancelRun(created.agentId, created.runId);
-            } catch (_) {}
-            throw RunFailedException('CANCELLED');
-          }
-          await _collectRun(
-            api,
-            conversation,
-            assistant,
-            created.agentId,
-            created.runId,
-          );
-          if (conversation.sharesQuickAgent) {
-            _noteQuickTopicSent(conversation.id);
-            unawaited(
-              _refreshQuickUsage(api, created.agentId, created.runId),
-            );
-            _maybePrecreateQuickAgent();
-          }
-        }
-      } catch (e) {
-        fail = e;
-      }
-      final lostFollowUp =
-          fail != null &&
-          userTurns > 1 &&
-          isTransientNetworkError(fail) &&
-          (conversation.pendingRunId == null ||
-              conversation.pendingRunId!.isEmpty);
-      if (fail != null &&
-          userTurns > 1 &&
-          !conversation.sharesQuickAgent &&
-          (shouldReplayAsNewAgent(fail) || lostFollowUp)) {
-        try {
-          assistant.text = '';
-          assistant.thinking = '';
-          notifyListeners();
-          await _replayAsNewAgent(
-            api,
-            conversation,
-            assistant,
-            question,
-            images,
-          );
-          fail = null;
-        } catch (e) {
-          fail = e;
-        }
-      }
-      if (fail != null) {
-        if (fail is RunFailedException && fail.status == 'CANCELLED') {
-          assistant.text = fail.userMessage;
-          conversation.pendingRunId = null;
-          error = null;
-          errorChatId = null;
-        } else {
-          error = friendlyNetworkError(fail);
-          errorChatId = conversation.id;
-          if (assistant.text.isEmpty || isFailedAssistantText(assistant.text)) {
-            assistant.text = '出错了：$error';
-          }
-          if (fail is RunFailedException || !isTransientNetworkError(fail)) {
-            conversation.pendingRunId = null;
-          }
-        }
-        assistant.streaming = false;
-      }
-    } finally {
-      await _endSend(conversation);
-    }
-  }
-
-  Future<void> _endSend(Conversation conv) async {
-    _inFlight.remove(conv.id);
-    _cancelTokens.remove(conv.id);
-    _cancelRequested.remove(conv.id);
-    conv.updatedAt = DateTime.now();
-    _sortConversations();
-    notifyListeners();
-    unawaited(_persist());
-    unawaited(
-      _drainQueued(
-        conv.sharesQuickAgent ? quickAgentId : conv.agentId,
-      ),
-    );
-  }
-
-  bool _needsTopicReplay(Conversation conv) {
-    if (!conv.sharesQuickAgent) return false;
-    if (quickAgentId == null || quickAgentId!.isEmpty) return false;
-    if (conv.agentId == null || conv.agentId!.isEmpty) return false;
-    if (conv.agentId == quickAgentId) return false;
-    return topicHasPriorTurns(conv.messages);
-  }
-
-  bool _shouldRemind() {
-    if (quickRuleRemindEvery <= 0) return false;
-    return (quickAgentTurnCount + 1) % quickRuleRemindEvery == 0;
-  }
-
-  bool _isContinuingOnCurrent(Conversation conv) {
-    return conv.agentId != null &&
-        conv.agentId == quickAgentId &&
-        quickAgentSentTopicIds.contains(conv.id);
-  }
-
-  bool _shouldRotateBeforeTopic(Conversation conv) {
-    if (_isContinuingOnCurrent(conv)) return false;
-    // Catching up an old topic is not a new topic. Rotating first would dump
-    // its history onto yet another agent and look like a random switch.
-    if (_needsTopicReplay(conv)) return false;
-    final n = quickAgentRotateAfter;
-    final t = quickAgentRotateTokens;
-    final topicHit =
-        n > 0 &&
-        quickAgentSentTopicIds.isNotEmpty &&
-        quickAgentSentTopicIds.length >= n - 1;
-    final tokenHit = t > 0 && quickAgentLastInputTokens >= t;
-    return topicHit || tokenHit;
-  }
-
-  void _resetQuickGeneration() {
-    quickAgentSentTopicIds.clear();
-    quickAgentTurnCount = 0;
-    quickAgentLastInputTokens = 0;
-    _quickGeneration++;
-  }
-
-  void _noteQuickTopicSent(String id) {
-    quickAgentSentTopicIds.add(id);
-    quickAgentTurnCount++;
-  }
-
-  Future<void> _prepareQuickSend(CursorApi api, Conversation conv) async {
-    _maybePrecreateQuickAgent();
-    if (_shouldRotateBeforeTopic(conv)) {
-      await _rotateQuickAgent(api);
-    }
-  }
-
-  void _maybePrecreateQuickAgent() {
-    if (nextQuickAgentId != null || _precreateInFlight != null) return;
-    if (quickAgentId == null || quickAgentId!.isEmpty) return;
-    final n = quickAgentRotateAfter;
-    final t = quickAgentRotateTokens;
-    final topicHit = n > 2 && quickAgentSentTopicIds.length >= n - 2;
-    final tokenHit =
-        t > 0 &&
-        quickAgentLastInputTokens > 0 &&
-        quickAgentLastInputTokens >= (t * 0.9).round();
-    if (!topicHit && !tokenHit) return;
-    _precreateInFlight = _precreateNextQuickAgent();
-  }
-
-  Future<void> _precreateNextQuickAgent() async {
-    final api = _api;
-    if (api == null) return;
-    final gen = _quickGeneration;
-    final id = 'bc-${uuid.v4()}';
-    nextQuickAgentId = id;
-    nextQuickAgentReady = false;
-    unawaited(_persist());
-    try {
-      final created = await api.createAgent(
-        text: quickAgentBootstrapPrompt(warmup: true),
-        modelId: modelId.isEmpty ? null : modelId,
-        modelParams: _paramsForApi,
-        name: '快速对话',
-        agentId: id,
-      );
-      if (gen != _quickGeneration) {
-        _retireQuickAgent(created.agentId);
-        return;
-      }
-      nextQuickAgentId = created.agentId;
-      try {
-        await api.streamRun(
-          agentId: created.agentId,
-          runId: created.runId,
-          onDelta: (_) {},
-        );
-      } catch (_) {
-        try {
-          await api.waitForRunText(created.agentId, created.runId);
-        } catch (_) {}
-      }
-      if (gen != _quickGeneration) {
-        _retireQuickAgent(created.agentId);
-        return;
-      }
-      nextQuickAgentReady = true;
-      unawaited(_persist());
-    } catch (_) {
-      if (gen == _quickGeneration) {
-        nextQuickAgentId = null;
-        nextQuickAgentReady = false;
-        unawaited(_persist());
-      }
-    } finally {
-      if (gen == _quickGeneration) _precreateInFlight = null;
-    }
-  }
-
-  Future<void> _rotateQuickAgent(CursorApi api) async {
-    final old = quickAgentId;
-    if (_precreateInFlight != null) {
-      try {
-        await _precreateInFlight;
-      } catch (_) {}
-    }
-    final standby = nextQuickAgentId;
-    if (nextQuickAgentId != null && nextQuickAgentReady) {
-      quickAgentId = nextQuickAgentId;
-    } else {
-      quickAgentId = null;
-    }
-    nextQuickAgentId = null;
-    nextQuickAgentReady = false;
-    _resetQuickGeneration();
-    unawaited(_persist());
-    if (old != null && old.isNotEmpty && old != quickAgentId) {
-      _retireQuickAgent(old);
-    }
-    if (standby != null &&
-        standby.isNotEmpty &&
-        standby != quickAgentId &&
-        standby != old) {
-      _retireQuickAgent(standby);
-    }
-  }
-
-  void _retireQuickAgent(String id) {
-    unawaited(() async {
-      for (var i = 0; i < 40; i++) {
-        if (!_isAgentBusy(id)) break;
-        await Future<void>.delayed(const Duration(milliseconds: 150));
-      }
-      if (quickAgentId == id || nextQuickAgentId == id) return;
-      try {
-        await _api?.deleteAgent(id);
-      } catch (_) {}
-    }());
-  }
-
-  Future<void> _refreshQuickUsage(
-    CursorApi api,
-    String agentId,
-    String runId,
-  ) async {
-    try {
-      final usage = await api.getAgentUsage(agentId, runId: runId);
-      if (usage.promptish > 0) {
-        quickAgentLastInputTokens = usage.promptish;
-        unawaited(_persist());
-        _maybePrecreateQuickAgent();
-      }
-    } catch (_) {}
-  }
-
-  String _promptForTurn(
-    Conversation conv,
-    String question,
-    int userTurns, {
-    bool creatingQuick = false,
-  }) {
-    if (!conv.sharesQuickAgent) {
-      return userTurns <= 1
-          ? '$kFirstTurnPrefix${recencyPreamble()}$question'
-          : '${recencyPreamble(followUp: true)}$question';
-    }
-    final replay = _needsTopicReplay(conv);
-    final remind = !creatingQuick && (replay || _shouldRemind());
-    final code = isTopicCode(conv.topicCode)
-        ? conv.topicCode!
-        : (conv.topicCode ?? conv.id);
-    final turn = quickTopicTurnPrompt(
-      topicCode: code,
-      question: question,
-      messages: conv.messages,
-      replay: replay,
-      remind: remind,
-      omitRecency: creatingQuick,
-    );
-    if (creatingQuick) {
-      return '${quickAgentBootstrapPrompt()}$turn';
-    }
-    return turn;
-  }
-
-  void _refreshTitle(Conversation conv) {
-    if (conv.titleFrozen) return;
-    ChatMessage? user;
-    ChatMessage? assistant;
-    for (final m in conv.messages) {
-      if (user == null && m.role == 'user') user = m;
-      if (m.role == 'assistant' &&
-          !m.streaming &&
-          m.text.trim().isNotEmpty &&
-          !isFailedAssistantText(m.text)) {
-        assistant = m;
-        break;
-      }
-    }
-    if (user == null) return;
-    conv.title = conversationTitle(user.text, assistantText: assistant?.text);
-    if (assistant != null) conv.titleFrozen = true;
-  }
-
-  Future<CreatedAgent> _createFirstRun(
-    CursorApi api,
-    Conversation conv,
-    String apiText,
-    List<PromptImage> images, {
-    String? agentId,
-  }) async {
-    final id = agentId ?? conv.agentId;
-    Object? last;
-    for (var i = 0; i < 3; i++) {
-      try {
-        return await api.createAgent(
-          text: apiText,
-          images: images,
-          modelId: modelId.isEmpty ? null : modelId,
-          modelParams: _paramsForApi,
-          name: conv.titleFrozen || !isUsableTitle(conv.title)
-              ? null
-              : conv.title,
-          agentId: id,
-        );
-      } catch (e) {
-        last = e;
-        if (id != null &&
-            (isTransientNetworkError(e) ||
-                (e is CursorApiException && e.status == 409))) {
-          final recovered = await api.recoverCreated(id);
-          if (recovered != null) return recovered;
-        }
-        if (!isTransientNetworkError(e)) break;
-      }
-    }
-    throw last!;
-  }
-
-  Future<CreatedAgent> _createFollowUp(
-    CursorApi api,
-    Conversation conv,
-    String apiText,
-    List<PromptImage> images, {
-    String? agentId,
-  }) async {
-    final id = agentId ?? conv.agentId!;
-    Object? last;
-    for (var i = 0; i < 3; i++) {
-      try {
-        final runId = await api.createRun(
-          agentId: id,
-          text: apiText,
-          images: images,
-        );
-        return CreatedAgent(agentId: id, runId: runId);
-      } catch (e) {
-        last = e;
-        if (!isTransientNetworkError(e)) break;
-      }
-    }
-    final e = last!;
-    if (isTransientNetworkError(e)) {
-      try {
-        final agent = await api.getAgent(id);
-        final runId = agent.latestRunId;
-        if (runId != null && runId.isNotEmpty) {
-          final run = await api.getRun(id, runId);
-          final created = DateTime.tryParse('${run['createdAt'] ?? ''}');
-          final assistantAt = conv.messages.last.createdAt;
-          if (created == null ||
-              !created.isBefore(
-                assistantAt.subtract(const Duration(seconds: 3)),
-              )) {
-            return CreatedAgent(agentId: id, runId: runId);
-          }
-        }
-      } catch (_) {}
-    }
-    throw e;
-  }
-
-  Future<void> _replayAsNewAgent(
-    CursorApi api,
-    Conversation conv,
-    ChatMessage assistant,
-    String question,
-    List<PromptImage> images,
-  ) async {
-    conv.pendingRunId = null;
-    if (conv.sharesQuickAgent) {
-      final old = quickAgentId;
-      final newId = 'bc-${uuid.v4()}';
-      quickAgentId = newId;
-      _resetQuickGeneration();
-      nextQuickAgentId = null;
-      nextQuickAgentReady = false;
-      final code = isTopicCode(conv.topicCode)
-          ? conv.topicCode!
-          : (conv.topicCode ?? conv.id);
-      final apiText =
-          '${quickAgentBootstrapPrompt()}${quickTopicTurnPrompt(topicCode: code, question: question, messages: conv.messages, replay: topicHasPriorTurns(conv.messages), remind: true, omitRecency: true)}';
-      final created = await _createFirstRun(
-        api,
-        conv,
-        apiText,
-        images,
-        agentId: newId,
-      );
-      quickAgentId = created.agentId;
-      conv.agentId = created.agentId;
-      conv.pendingRunId = created.runId;
-      unawaited(_persist());
-      await _collectRun(api, conv, assistant, created.agentId, created.runId);
-      _noteQuickTopicSent(conv.id);
-      unawaited(_refreshQuickUsage(api, created.agentId, created.runId));
-      if (old != null && old.isNotEmpty && old != created.agentId) {
-        _retireQuickAgent(old);
-      }
-      return;
-    }
-    final previous = conv.agentId;
-    conv.agentId = 'bc-${uuid.v4()}';
-    final apiText =
-        '$kFirstTurnPrefix${recencyPreamble()}${conversationContinuityPrompt(conv.messages, question)}';
-    final created = await _createFirstRun(api, conv, apiText, images);
-    conv.agentId = created.agentId;
-    conv.pendingRunId = created.runId;
-    unawaited(_persist());
-    await _collectRun(api, conv, assistant, created.agentId, created.runId);
-    if (previous != null &&
-        previous.isNotEmpty &&
-        previous != created.agentId) {
-      _retireQuickAgent(previous);
-    }
-  }
-
-  Future<(String, String)> _ensureRun(CursorApi api, Conversation conv) async {
-    if (conv.agentId != null &&
-        conv.pendingRunId != null &&
-        conv.pendingRunId!.isNotEmpty) {
-      return (conv.agentId!, conv.pendingRunId!);
-    }
-    if (conv.agentId != null) {
-      final recovered = await api.recoverCreated(conv.agentId!);
-      if (recovered != null) {
-        conv.pendingRunId = recovered.runId;
-        unawaited(_persist());
-        return (recovered.agentId, recovered.runId);
-      }
-    }
-    throw CursorApiException(0, '上次请求还没发出去。');
-  }
-
-  Future<void> _collectRun(
-    CursorApi api,
-    Conversation conv,
-    ChatMessage assistant,
-    String agentId,
-    String runId,
-  ) async {
-    conv.agentId = agentId;
-    conv.pendingRunId = runId;
-    unawaited(_persist());
-
-    var finalText = '';
-    try {
-      final token = CancelToken();
-      _cancelTokens[conv.id] = token;
-      if (_cancelRequested.contains(conv.id)) {
-        token.cancel();
-      }
-      finalText = await api.streamRun(
-        agentId: agentId,
-        runId: runId,
-        cancelToken: token,
-        onDelta: (delta) {
-          assistant.text += delta;
-          notifyListeners();
-        },
-        onThinking: (delta) {
-          assistant.thinking += delta;
-          notifyListeners();
-        },
-      );
-    } catch (e) {
-      if (e is RunFailedException) rethrow;
-      if (e is CursorApiException && e.isStreamGone) {
-        // Run already finished; fetch the stored reply below.
-      } else if (!isTransientNetworkError(e) &&
-          !(e is CursorApiException && e.status == 0)) {
-        rethrow;
-      }
-      try {
-        finalText = await api.waitForRunText(agentId, runId);
-      } catch (pollError) {
-        if (pollError is RunFailedException) rethrow;
-        if (assistant.text.trim().isNotEmpty &&
-            !isFailedAssistantText(assistant.text)) {
-          error = null;
-          assistant.streaming = false;
-          conv.pendingRunId = null;
-          _refreshTitle(conv);
-          return;
-        }
-        rethrow;
-      }
-    }
-
-    if (isFailedAssistantText(finalText)) {
-      throw RunFailedException('ERROR', message: finalText);
-    }
-    if (finalText.isNotEmpty &&
-        (assistant.text.isEmpty || finalText.length >= assistant.text.length)) {
-      assistant.text = finalText;
-    }
-    if (isFailedAssistantText(assistant.text)) {
-      throw RunFailedException('ERROR', message: assistant.text);
-    }
-    if (assistant.text.trim().isEmpty) {
-      assistant.text = '（没有文字回复）';
-    }
-    assistant.streaming = false;
-    conv.pendingRunId = null;
-    error = null;
-    _refreshTitle(conv);
   }
 
   Future<void> _withWakeLock(Future<void> Function() fn) async {
@@ -1538,14 +754,16 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
       return;
     }
     if (quickAgentId == agentId) {
-      quickAgentId = null;
+      _setQuickAgent(null);
       nextQuickAgentId = null;
       nextQuickAgentReady = false;
+      nextQuickAgentModelStamp = null;
       _resetQuickGeneration();
     }
     if (nextQuickAgentId == agentId) {
       nextQuickAgentId = null;
       nextQuickAgentReady = false;
+      nextQuickAgentModelStamp = null;
     }
     for (final c in conversations) {
       if (c.kind == ConversationKind.isolated && c.agentId == agentId) {
@@ -1567,6 +785,8 @@ class ChatStore extends ChangeNotifier implements VoiceStoreView {
           'quickAgentId': quickAgentId,
           'nextQuickAgentId': nextQuickAgentId,
           'nextQuickAgentReady': nextQuickAgentReady,
+          'quickAgentModelStamp': quickAgentModelStamp,
+          'nextQuickAgentModelStamp': nextQuickAgentModelStamp,
           'quickAgentLastInputTokens': quickAgentLastInputTokens,
           'quickAgentTurnCount': quickAgentTurnCount,
           'usedTopicCodes': usedTopicCodes,
@@ -1594,6 +814,31 @@ _RetryTarget? _retryTarget(Conversation? conv) {
     return _RetryTarget(conv, assistant, user);
   }
   return null;
+}
+
+class _SendJob {
+  _SendJob.send(this.convId, this.messageId, {this.rush = false})
+    : kind = 'send';
+  _SendJob.retry(this.convId) : kind = 'retry', messageId = null, rush = false;
+  _SendJob.resume(this.convId)
+    : kind = 'resume',
+      messageId = null,
+      rush = false;
+
+  final String kind;
+  final String convId;
+  final String? messageId;
+  final bool rush;
+  int seq = 0;
+  final Completer<void> done = Completer<void>();
+
+  void finish() {
+    if (!done.isCompleted) done.complete();
+  }
+}
+
+class _AgentBusy implements Exception {
+  const _AgentBusy();
 }
 
 class _RetryTarget {
@@ -1655,13 +900,13 @@ String conversationContinuityPrompt(
     if (identical(m, lastUser) || m.streaming) continue;
     final t = m.text.trim();
     if (t.isEmpty || isFailedAssistantText(t)) continue;
-      if (m.role == 'user') {
-        buf.writeln('用户：$t');
-      } else if (m.role == 'assistant') {
-        buf.writeln('助手：${clipPromptHistory(t)}');
-      }
-      buf.writeln();
+    if (m.role == 'user') {
+      buf.writeln('用户：$t');
+    } else if (m.role == 'assistant') {
+      buf.writeln('助手：${clipPromptHistory(t)}');
     }
-    buf.writeln('用户最后一句：$currentQuestion');
-    return buf.toString();
+    buf.writeln();
+  }
+  buf.writeln('用户最后一句：$currentQuestion');
+  return buf.toString();
 }

@@ -17,9 +17,17 @@ class FakeCursorApi extends CursorApi {
   Object? nextCreateError;
   Object? nextStreamError;
   Object? nextWaitError;
+  String? latestRunId;
+  final Map<String, String> runStatus = {};
+  final List<String?> createdModelIds = [];
+  int createRunCalls = 0;
+  int waitCalls = 0;
 
   /// When true, every createRun fails with a network error (createAgent still works).
   bool failRuns = false;
+
+  /// Warmup agents finish immediately so rotation tests are not left hanging.
+  bool autoFinishWarmup = true;
   int seq = 0;
   int listModelsCalls = 0;
   int listModelsFailTimes = 0;
@@ -69,9 +77,12 @@ class FakeCursorApi extends CursorApi {
     _throwCreateIfNeeded();
     seq++;
     createdPrompts.add(text);
+    createdModelIds.add(modelId);
     final runId = 'run-$seq';
-    if (name == '快速对话') {
+    runStatus[runId] = 'RUNNING';
+    if (name == '快速对话' && autoFinishWarmup) {
       _results[runId] = 'OK';
+      runStatus[runId] = 'FINISHED';
     }
     return CreatedAgent(
       agentId: agentId ?? 'bc-$seq',
@@ -86,20 +97,25 @@ class FakeCursorApi extends CursorApi {
     required String text,
     List<PromptImage> images = const [],
   }) async {
+    createRunCalls++;
     if (failRuns) {
       throw CursorApiException(0, 'Connection reset');
     }
     _throwCreateIfNeeded();
     seq++;
     createdPrompts.add(text);
-    return 'run-$seq';
+    final runId = 'run-$seq';
+    runStatus[runId] = 'RUNNING';
+    latestRunId = runId;
+    return runId;
   }
 
   @override
   Future<CreatedAgent?> recoverCreated(String agentId) async => null;
 
   @override
-  Future<AgentInfo> getAgent(String agentId) async => AgentInfo(id: agentId);
+  Future<AgentInfo> getAgent(String agentId) async =>
+      AgentInfo(id: agentId, latestRunId: latestRunId);
 
   @override
   Future<AgentTokenUsage> getAgentUsage(String agentId, {String? runId}) async {
@@ -109,11 +125,15 @@ class FakeCursorApi extends CursorApi {
 
   @override
   Future<Map<String, dynamic>> getRun(String agentId, String runId) async => {
-    'status': 'RUNNING',
+    'status':
+        runStatus[runId] ??
+        (_results.containsKey(runId) ? 'FINISHED' : 'RUNNING'),
+    'result': _results[runId],
   };
 
   @override
   Future<String> waitForRunText(String agentId, String runId) async {
+    waitCalls++;
     if (nextWaitError != null) {
       final e = nextWaitError!;
       nextWaitError = null;
@@ -125,6 +145,7 @@ class FakeCursorApi extends CursorApi {
   @override
   Future<void> cancelRun(String agentId, String runId) async {
     cancelledRuns.add(runId);
+    runStatus[runId] = 'CANCELLED';
     final c = streams[runId];
     if (c != null && !c.isCompleted) {
       c.completeError(RunFailedException('CANCELLED'));
@@ -137,7 +158,10 @@ class FakeCursorApi extends CursorApi {
   @override
   Future<void> deleteAgent(String agentId) async {
     deletedAgents.add(agentId);
-    listedAgents = [for (final a in listedAgents) if (a.id != agentId) a];
+    listedAgents = [
+      for (final a in listedAgents)
+        if (a.id != agentId) a,
+    ];
   }
 
   @override
@@ -167,6 +191,7 @@ class FakeCursorApi extends CursorApi {
   }
 
   void finish(String runId, String text) {
+    runStatus[runId] = 'FINISHED';
     _results[runId] = text;
     final c = streams[runId];
     if (c != null && !c.isCompleted) {
@@ -177,6 +202,7 @@ class FakeCursorApi extends CursorApi {
   }
 
   void fail(String runId, [Object? error]) {
+    runStatus[runId] = 'ERROR';
     final c = _openStream(runId);
     if (!c.isCompleted) {
       c.completeError(error ?? RunFailedException('ERROR'));

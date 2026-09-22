@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../api/cursor_api.dart';
 import '../store.dart';
+import 'run_log_page.dart';
 import '../voice/device_profile.dart';
 import '../voice/model_catalog.dart';
 import '../voice/voice_settings.dart';
@@ -35,7 +36,9 @@ class _SettingsPageState extends State<SettingsPage> {
   void initState() {
     super.initState();
     _key = TextEditingController(text: store.apiKey);
-    _rotateAfter = TextEditingController(text: '${store.quickAgentRotateAfter}');
+    _rotateAfter = TextEditingController(
+      text: '${store.quickAgentRotateAfter}',
+    );
     _rotateTokens = TextEditingController(
       text: '${store.quickAgentRotateTokens}',
     );
@@ -152,7 +155,7 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(height: 8),
               ..._modelSection(context),
               Text(
-                '已开始的对话沿用当时的模型；改档位后请在侧栏「独立 Agent」点 + 新开一只。快速对话换话题不会换模型。',
+                '正在聊的话题沿用当时的模型。改了模型或档位后，下一个新话题会换一只 Agent。独立 Agent 仍然要点 +。',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 8),
@@ -217,6 +220,22 @@ class _SettingsPageState extends State<SettingsPage> {
                 label: '每隔多少轮复述编号规则',
                 controller: _remindEvery,
                 onChanged: store.setQuickRuleRemindEvery,
+              ),
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  key: const Key('settings-open-run-log'),
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => RunLogPage(store: store),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.receipt_long_outlined, size: 18),
+                  label: const Text('运行记录'),
+                ),
               ),
               const SizedBox(height: 12),
               Wrap(
@@ -383,7 +402,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
         onSelected: (v) {
           if (v == null) return;
-          store.selectModel(v, persist: false);
+          store.selectModel(v);
         },
       ),
       const SizedBox(height: 16),

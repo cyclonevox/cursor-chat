@@ -185,6 +185,57 @@ void main() {
         await req.response.close();
         return;
       }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-sse-error/stream') {
+        req.response.statusCode = 200;
+        req.response.headers.set(
+          'Content-Type',
+          'text/event-stream; charset=utf-8',
+        );
+        req.response.add(
+          utf8.encode(
+            'event: error\ndata: {"code":"stream_glitch","message":"socket blip"}\n\n',
+          ),
+        );
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-sse-error') {
+        await sendJson(200, {
+          'id': 'run-sse-error',
+          'agentId': 'bc-test',
+          'status': 'FINISHED',
+          'result': 'recovered after stream error',
+        });
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-partial/stream') {
+        req.response.statusCode = 200;
+        req.response.headers.set(
+          'Content-Type',
+          'text/event-stream; charset=utf-8',
+        );
+        req.response.add(
+          utf8.encode(
+            'event: assistant\ndata: {"text":"hi"}\n\n'
+            'event: done\ndata: {}\n\n',
+          ),
+        );
+        await req.response.close();
+        return;
+      }
+      if (req.method == 'GET' &&
+          path == '/v1/agents/bc-test/runs/run-partial') {
+        await sendJson(200, {
+          'id': 'run-partial',
+          'agentId': 'bc-test',
+          'status': 'FINISHED',
+          'result': 'hello full',
+        });
+        return;
+      }
       if (req.method == 'GET' && path == '/v1/agents') {
         await sendJson(200, {
           'items': [
@@ -415,6 +466,30 @@ void main() {
       expect(e.userMessage.contains('运行结束'), isFalse);
     }
   });
+
+  test(
+    'stream error event is not a failed run; poll returns the reply',
+    () async {
+      final text = await api.streamRun(
+        agentId: 'bc-test',
+        runId: 'run-sse-error',
+        onDelta: (_) {},
+      );
+      expect(text, 'recovered after stream error');
+    },
+  );
+
+  test(
+    'done without result polls instead of keeping the partial text',
+    () async {
+      final text = await api.streamRun(
+        agentId: 'bc-test',
+        runId: 'run-partial',
+        onDelta: (_) {},
+      );
+      expect(text, 'hello full');
+    },
+  );
 
   test('waitForRunText throws instead of returning 运行结束：ERROR', () async {
     try {

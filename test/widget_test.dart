@@ -87,6 +87,47 @@ void main() {
     expect(find.text('已复制'), findsOneWidget);
   });
 
+  testWidgets('error banner sits under the app bar on a phone', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    tester.view.padding = const FakeViewPadding(top: 47, bottom: 34);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPadding);
+
+    final store = ChatStore();
+    store.apiKey = 'k';
+    store.conversations.clear();
+    store.newChat();
+    store.active!.title = '通分';
+    store.active!.messages.addAll([
+      ChatMessage(id: 'u1', role: 'user', text: '这题为啥要先通分？'),
+      ChatMessage(id: 'a1', role: 'assistant', text: '出错了：这次没答出来。点重发再试，或新开对话。'),
+    ]);
+    store.error = '这次没答出来。点重发再试，或新开对话。';
+    await tester.pumpWidget(ChatApp(store: store));
+    await tester.pump();
+
+    final bar = tester.getRect(find.byType(AppBar));
+    final banner = tester.getRect(find.byKey(const Key('error-banner')));
+    final mode = tester.getRect(
+      find.descendant(
+        of: find.byType(AppBar),
+        matching: find.textContaining('快速对话'),
+      ),
+    );
+    final close = tester.getRect(find.byIcon(Icons.close));
+    final screen = tester.getRect(find.byType(Scaffold));
+
+    expect(mode.bottom, lessThanOrEqualTo(bar.bottom));
+    expect(banner.top, greaterThanOrEqualTo(bar.bottom - 1));
+    expect(close.right, lessThanOrEqualTo(screen.right));
+    expect(close.left, greaterThanOrEqualTo(screen.left));
+    expect(find.text('重发'), findsWidgets);
+    expect(find.text('记录'), findsOneWidget);
+  });
+
   testWidgets('error banner can be dismissed', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final store = ChatStore();
@@ -206,9 +247,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     final drawer = find.byType(Drawer);
-    await tester.tap(
-      find.descendant(of: drawer, matching: find.text('快速对话')),
-    );
+    await tester.tap(find.descendant(of: drawer, matching: find.text('快速对话')));
     await tester.pump();
     expect(store.activeId, 't-weather');
     expect(store.active?.title, '今天热不热');

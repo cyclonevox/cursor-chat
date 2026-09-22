@@ -458,8 +458,26 @@ void main() {
               child: VoiceListeningBar(
                 elapsed: Duration(seconds: 7),
                 debugLevels: [
-                  0.05, 0.08, 0.1, 0.12, 0.2, 0.35, 0.7, 1, 0.85, 0.4,
-                  0.18, 0.1, 0.08, 0.06, 0.05, 0.04, 0.04, 0.05, 0.06, 0.05,
+                  0.05,
+                  0.08,
+                  0.1,
+                  0.12,
+                  0.2,
+                  0.35,
+                  0.7,
+                  1,
+                  0.85,
+                  0.4,
+                  0.18,
+                  0.1,
+                  0.08,
+                  0.06,
+                  0.05,
+                  0.04,
+                  0.04,
+                  0.05,
+                  0.06,
+                  0.05,
                 ],
               ),
             ),
@@ -473,7 +491,9 @@ void main() {
         matching: find.byType(CustomPaint),
       ),
     );
-    final timer = tester.getRect(find.byKey(const Key('composer-voice-elapsed')));
+    final timer = tester.getRect(
+      find.byKey(const Key('composer-voice-elapsed')),
+    );
     expect(timer.left, greaterThan(wave.right));
     expect(find.text('0:07'), findsOneWidget);
   });
@@ -613,7 +633,7 @@ void main() {
     final store = ChatStore();
     store.conversations.clear();
     store.newChat();
-    await tester.binding.setSurfaceSize(const Size(400, 1600));
+    await tester.binding.setSurfaceSize(const Size(400, 2400));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(home: SettingsPage(store: store)));
     await tester.pump();
